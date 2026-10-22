@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PCD · DHO814 / DG2052</title>
 <link rel="stylesheet" href="vendor/uPlot.min.css">
-<link rel="stylesheet" href="app.css?v=scharm2">
+<link rel="stylesheet" href="app.css?v=wiring1">
 <script src="vendor/uplot.iife.min.js"></script>
 <script src="app.js?v=iclim2"></script>
 <script defer src="vendor/alpine.min.js"></script>
@@ -65,6 +65,14 @@
           <option value="4">CH4</option>
         </select>
         <span class="unit">示波器</span>
+      </div>
+      <!-- 接线说明由 MATLAB 侧 pcd_wiring 按当前通道号生成。接错任何一根都不会报错，
+           只会让数据「看着正常但其实不对」，所以常驻显示而不是藏进提示框。 -->
+      <div class="wiring" x-show="wiring.length">
+        <div class="wiring-title">接线 · 本实验室仪器（DG2052 + DHO814）</div>
+        <template x-for="(w, i) in wiring" :key="i">
+          <div class="wiring-line" x-text="w"></div>
+        </template>
       </div>
     </section>
 

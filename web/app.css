@@ -239,3 +239,8 @@ button.run-stop{background:linear-gradient(180deg,var(--danger-hi),var(--danger)
   filter:brightness(1.1);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.16), 0 2px 12px rgba(189,69,64,.5);
 }
+
+/* 接线说明块：常驻显示，不用 tooltip —— 接错线不报错，藏起来等于没有 */
+.wiring{margin:10px 0 2px;padding:9px 11px;border:1px solid var(--border);border-radius:var(--r-card);background:var(--panel)}
+.wiring-title{color:var(--muted);font-size:11px;letter-spacing:.3px;margin-bottom:6px}
+.wiring-line{color:var(--text);font-size:11.5px;line-height:1.7;white-space:pre-wrap}

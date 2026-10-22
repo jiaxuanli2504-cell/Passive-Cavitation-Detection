@@ -22,6 +22,9 @@ if isfield(cfg, 'awg_mode') && strcmpi(strtrim(char(string(cfg.awg_mode))), 'man
     L.awg_mode = 'manual';
     L.manual = true;
 end
+% 接线说明（按通道号动态生成）。放在这里而不是各处自己拼：
+% 仪器设置对话框和主界面都要显示同一套话，接错任何一根都不报错，只能靠提示。
+[L.wiring, L.wiringText] = pcd_wiring(cfg);
 end
 
 function ch = clamp_ch(cfg, key, fallback)

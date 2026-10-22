@@ -275,6 +275,9 @@
         fftTx: '频谱  FFT  ·  CH1',
         fftPcd: '频谱  FFT  ·  CH2'
       },
+      // 接线说明由 MATLAB 侧按当前通道号生成（pcd_wiring），这里只负责显示。
+      // 接错线不会报错，只会让数据「看着正常但其实不对」，所以常驻可见。
+      wiring: [],
       // 字段名与 MATLAB 侧存档（pcd_gui_params）完全一致，两边共用一套词汇
       p: defaultParams(),
       charts: {},
@@ -517,6 +520,12 @@
         if (I.pcdTime) { this.titles.pcd = I.pcdTime; }
         if (I.txFft) { this.titles.fftTx = I.txFft; }
         if (I.pcdFft) { this.titles.fftPcd = I.pcdFft; }
+        // MATLAB 的 cellstr 到 JSON 是数组；字符串则按单条处理，两种都接住。
+        if (Array.isArray(I.wiring)) {
+          this.wiring = I.wiring.map(function (s) { return String(s); });
+        } else if (typeof I.wiring === 'string' && I.wiring) {
+          this.wiring = I.wiring.split(/\r?\n/);
+        }
       },
       paintTitles: function () {
         var tx = 'CH' + this.chTx, pcd = 'CH' + this.chPcd;

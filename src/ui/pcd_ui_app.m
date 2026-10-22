@@ -177,6 +177,9 @@ function I = instr_payload()
 L = pcd_scope_labels();
 I = struct('awg_mode', L.awg_mode, 'tx', L.tx, 'pcd', L.pcd, ...
     'txTime', L.txTime, 'pcdTime', L.pcdTime, 'txFft', L.txFft, 'pcdFft', L.pcdFft);
+% 接线说明随仪器状态一起推给前端：接错线不会报错，只能在界面上提醒。
+% 单独赋值而不是塞进 struct(...)，否则 cellstr 会被 struct() 展开成结构体数组。
+I.wiring = L.wiring;
 end
 
 function S = apply_params(fig, D, live)

@@ -14,15 +14,16 @@ S = struct('devs', []);
 fn = ui_font();
 
 fig = uifigure('Name', '仪器设置 / Instruments', ...
-    'Color', C.fig, 'Position', [100 80 760 560], ...
+    'Color', C.fig, 'Position', [100 60 780 700], ...
     'Resize', 'on', 'WindowStyle', 'alwaysontop', 'Visible', 'off');
 fig.CloseRequestFcn = @(src, ~) delete(src);
 
-g = uigridlayout(fig, [8 1]);
+g = uigridlayout(fig, [10 1]);
 g.BackgroundColor = C.fig;
 g.Padding = [14 12 14 12];
 g.RowSpacing = 8;
-g.RowHeight = {28, 36, '1x', 36, 34, 34, 34, 40};
+% 第 8 行放触发/镜像通道，第 9 行放接线说明（接错不报错，必须写在用户会看的地方）
+g.RowHeight = {28, 36, '1x', 36, 34, 34, 34, 34, 132, 40};
 
 hint = uilabel(g, 'Text', ...
     '先「扫描仪器」；空栏会自动填入识别到的型号。已有地址请选中后点「设为」。', ...
@@ -66,15 +67,36 @@ tx_sp  = mk_ch_pair(row7, C, fn, '回读 CH', cfg.scope_tx_channel, [1 4]);
 pcd_sp = mk_ch_pair(row7, C, fn, 'PCD CH', cfg.scope_pcd_channel, [1 4]);
 awg_sp = mk_ch_pair(row7, C, fn, '信号源 CH', cfg.awg_channel, [1 2]);
 
-row8 = uigridlayout(g, [1 3]);
+% 触发通道与回读镜像：这两个值决定了整套接线，
+% 以前只能改 ini，界面上看不到也就没法对照接线。
+row8 = uigridlayout(g, [1 4]);
 row8.Layout.Row = 8;
 row8.BackgroundColor = C.fig;
 row8.Padding = [0 0 0 0];
-row8.ColumnWidth = {110, 110, '1x'};
-row8.ColumnSpacing = 8;
-mk_btn(row8, C, fn, '保存', C.btn, @(~, ~) do_save());
-mk_btn(row8, C, fn, '取消', C.btn2, @(~, ~) delete(fig));
-uilabel(row8, 'Text', ['配置文件：' rigol_instr_config('file')], ...
+row8.ColumnWidth = {'fit', 'fit', '1x'};
+row8.ColumnSpacing = 20;
+trig_sp = mk_ch_pair(row8, C, fn, '触发 CH', cfg.scope_trig_channel, [0 4]);
+mon_sp  = mk_ch_pair(row8, C, fn, '回读镜像', cfg.awg_monitor_channel, [0 2]);
+uilabel(row8, 'Text', '触发 0=用回读边沿；回读镜像 0=不启用', ...
+    'FontColor', C.muted, 'FontName', fn, 'FontSize', 10);
+
+% 接线说明：由 pcd_wiring 按上面四个通道号生成，改通道后这几行会跟着变。
+wl = pcd_scope_labels();
+wire = uilabel(g, 'Text', ['　接线（本实验室这套仪器）' newline wl.wiringText], ...
+    'FontColor', C.text, 'FontName', fn, 'FontSize', 11, ...
+    'WordWrap', 'on', 'VerticalAlign', 'top');
+wire.Layout.Row = 9;
+wire.BackgroundColor = C.editBg;
+
+row_btn = uigridlayout(g, [1 3]);
+row_btn.Layout.Row = 10;
+row_btn.BackgroundColor = C.fig;
+row_btn.Padding = [0 0 0 0];
+row_btn.ColumnWidth = {110, 110, '1x'};
+row_btn.ColumnSpacing = 8;
+mk_btn(row_btn, C, fn, '保存', C.btn, @(~, ~) do_save());
+mk_btn(row_btn, C, fn, '取消', C.btn2, @(~, ~) delete(fig));
+uilabel(row_btn, 'Text', ['配置文件：' rigol_instr_config('file')], ...
     'FontColor', C.muted, 'FontName', fn, 'FontSize', 10, 'WordWrap', 'on');
 
 fig.Visible = 'on';
@@ -212,8 +234,29 @@ uiwait(fig);
         tx = round(tx_sp.Value);
         pcd = round(pcd_sp.Value);
         aw = round(awg_sp.Value);
+        tg = round(trig_sp.Value);
+        mw = round(mon_sp.Value);
         if tx == pcd
             uialert(fig, '回读通道与 PCD 通道不能相同。', 'PCD', 'Icon', 'warning');
+            return;
+        end
+        % 下面三条对应的接线错误不会在采集中报错，只会让数据「看着正常但其实不对」，
+        % 所以在这里就挡住：触发通道撞 PCD、镜像通道撞主通道、开了镜像却没有触发通道。
+        % 注意「触发 CH = 回读 CH」不算错：它与填 0 等价（见 rigol_dho814_setup 的 ttlTrig）。
+        if tg >= 1 && tg == pcd
+            uialert(fig, sprintf('触发通道 CH%d 和 PCD 通道撞了同一路，请另选一路空闲通道。', tg), ...
+                'PCD', 'Icon', 'warning');
+            return;
+        end
+        if mw > 0 && mw == aw
+            uialert(fig, sprintf('回读镜像通道不能和主输出通道相同（都是 CH%d）。', aw), ...
+                'PCD', 'Icon', 'warning');
+            return;
+        end
+        if mw > 0 && tg < 1
+            uialert(fig, ['启用了回读镜像，但「触发 CH」还是 0：副本通道靠主通道后面板 TrigOut ' ...
+                '做外部触发才会输出，没有这根线它一直是空的（回读、削顶检测全部退化成噪声）。' ...
+                '请把「触发 CH」也设上。'], 'PCD', 'Icon', 'warning');
             return;
         end
         cfg.scope_visa = s1;
@@ -223,6 +266,8 @@ uiwait(fig);
         cfg.scope_tx_channel = tx;
         cfg.scope_pcd_channel = pcd;
         cfg.awg_channel = aw;
+        cfg.scope_trig_channel = tg;
+        cfg.awg_monitor_channel = mw;
         try
             rigol_instr_config('save', cfg);
             pcd_visa('close');
