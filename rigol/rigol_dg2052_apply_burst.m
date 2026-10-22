@@ -72,17 +72,19 @@ if ~startsWith(upper(sl), 'POS')
 end
 
 % ---- 回读镜像通道：同一波形，外触发，由主通道 TrigOut 启动 ----
-mon = awg_monitor_channel();
+[mon, mon_load] = rigol_dg2052_monitor();
 if mon > 0 && mon ~= ch
-    apply_mirror(dev, mon, freq_hz, vpp, nc);
+    apply_mirror(dev, mon, freq_hz, vpp, nc, mon_load);
 end
 end
 
-function apply_mirror(dev, ch, freq_hz, vpp, nc)
+function apply_mirror(dev, ch, freq_hz, vpp, nc, load_ohms)
 %APPLY_MIRROR 把镜像通道配成主通道的副本，触发源设为外触发。
-% 顺序不能动：BURSt ON 之前写触发源会被静默忽略（实测无报错、回读仍是 INT）。
+% 两处顺序都不能动：
+%   1) 负载声明要在写 VOLTage 之前 —— 补偿只在写幅度时算一次（实测，反了就是 2 倍）；
+%   2) BURSt ON 要在写触发源之前 —— 否则被静默忽略（实测无报错、回读仍是 INT）。
 msrc = sprintf('SOURce%d', ch);
-rigol_dg2052_load(dev, ch);
+rigol_dg2052_load(dev, ch, load_ohms);
 writeline(dev, sprintf(':%s:FUNCtion SINusoid', msrc));
 writeline(dev, sprintf(':%s:FREQuency %.12g', msrc, freq_hz));
 writeline(dev, sprintf(':%s:VOLTage:UNIT VPP', msrc));
@@ -111,18 +113,4 @@ if ~(isfinite(mnc) && abs(mnc - nc) < 1)
 end
 end
 
-function mon = awg_monitor_channel()
-%AWG_MONITOR_CHANNEL 回读镜像通道号；0 = 不镜像（回读靠别的方式取得）。
-mon = 0;
-try
-    cfg = rigol_instr_config();
-    if isfield(cfg, 'awg_monitor_channel') && isnumeric(cfg.awg_monitor_channel) ...
-            && isscalar(cfg.awg_monitor_channel) && isfinite(cfg.awg_monitor_channel)
-        v = round(double(cfg.awg_monitor_channel));
-        if v >= 1 && v <= 2
-            mon = v;
-        end
-    end
-catch
-end
-end
+
