@@ -1,12 +1,23 @@
-function [chPcd, timeIntervalNanoSeconds, realFs, chTx, okTx, lead_s, crop_mode] = rigol_dho814_acquire_block(dev, npts, ch, mode, timeout_s, live_wait_s, burst_s)
+function [chPcd, timeIntervalNanoSeconds, realFs, chTx, okTx, anchor_i, crop_mode] = rigol_dho814_acquire_block(dev, npts, ch, mode, timeout_s, live_wait_s, burst_s)
 %RIGOL_DHO814_ACQUIRE_BLOCK
-% 'single'：等 CH1 边沿后读 RAW。触发超时则 STOP 后仍读一屏。
-% 'live'：RUN 约一个 PRF 再 STOP 读（CH1 太弱、边沿触发空等时用）。
+% 'single'：等一次触发后读 RAW。触发超时则 STOP 后仍读一屏。
+% 'live'：RUN 约一个 PRF 再 STOP 读（回读太弱、边沿触发空等时用）。
 %
 % npts 是这一发要用来做频谱的**精确点数**（= rigol_dho814_capture_geometry 的 acq_n），
-% 不是「最多多少点」：第 5 个输出 okTx 说明回读通道这一帧是否读到了。
-% 回读是诊断用的，它毛刺不该把完好的 PCD 帧一起丢掉 —— 调用方按 okTx 决定要不要
-% 只用 PCD，而不是因为 chTx 为空就把整帧判废。
+% 不是「最多多少点」。
+%
+% 锚点（这一发在记录里的起点）怎么定，取决于触发怎么给：
+%   'trigger' —— 配了独立触发通道（发生器后面板 Trig Out → 某一路模拟 BNC）时，
+%                触发时刻就是这一发的起点，位置由示波器几何直接给出：
+%                    i0 = round(-XORigin / XINCrement) + 1
+%                实测 6 帧零漂移、误差 64 ns。**不扫波形**，因此与回读幅度无关，
+%                回读读失败也不影响取窗。
+%   'span'    —— 靠回读通道的模拟边沿触发时，t0 在记录里的位置未知，只能在数据里
+%                找包络上升沿。这条路有 20 µs 平滑窗带来的 ~12 µs 系统偏置，
+%                且要求回读幅度足够大（≲20 mVpp 会找不到）。
+% 第 6 个输出 anchor_i 是实际用的起点下标（没定出锚点时为 []），第 7 个 crop_mode
+% 说明走了哪条路 / 是否退回 'fallback'。这两个值就是为了让上面的区别在日志里可见 ——
+% 只看返回点数分不出 'trigger' 和 'span'，两者都会被 npts 夹成同样的长度。
 cfg = rigol_instr_config();
 if nargin < 3 || isempty(ch)
     ch = cfg.scope_pcd_channel;
@@ -36,11 +47,16 @@ end
 chPcd = [];
 chTx = [];
 xinc = NaN;
-lead_s = NaN;   % 先占住：里面有多处提前 return，不留到 catch 才算未定义
-% 这一帧用的是哪条裁剪路径。'fixed' 才代表「从发射沿起取满 acq_n 点」，
-% 退回 'span' 就是旧的「包络到哪算哪」。不报出来就只能靠长度反推，而
-% 两条路径在多数情况下点数相同（都被 npts 夹住），根本分不开。
+anchor_i = [];   % 先占住：里面有多处提前 return，不留到 catch 才算未定义
 crop_mode = 'none';
+% 配了独立触发通道 → 触发时刻就是这一发的起点，锚点可以算出来，不必扫波形。
+% 判据与 rigol_dho814_setup 里 ttlTrig 同源：触发通道存在且不是回读通道。
+hwTrig = false;
+if isfield(cfg, 'scope_trig_channel') && isnumeric(cfg.scope_trig_channel) ...
+        && isscalar(cfg.scope_trig_channel) && isfinite(cfg.scope_trig_channel)
+    tc = round(double(cfg.scope_trig_channel));
+    hwTrig = tc >= 1 && tc <= 4 && tc ~= tx;
+end
 try
     if strcmpi(mode, 'live')
         % RAW 只能在 STOP 后读。调试若只 STOP 不 RUN，第一帧用的是 setup 里
@@ -111,8 +127,6 @@ try
 
     % 两路各读整段内存，再裁同一段。
     % 不写 STARt/STOP：这台固件一写就 -200，屏幕报远程指令执行错误。
-    % 这台机器的 XORigin 会落在真正跳变前面 1–3 ms，不能拿它当脉冲开头。
-    % 起点用回读通道上电平实际升高的地方，两路同一组下标。空档里没有这个跳变就不往前裁。
     [chTx, xinc, xorigin] = read_raw(dev, tx, npts);
     [chPcd, x2, xo2] = read_raw(dev, ch, npts);
     if ~(isfinite(xinc) && xinc > 0) && isfinite(x2) && x2 > 0
@@ -121,30 +135,34 @@ try
     if ~(isfinite(xorigin)) && isfinite(xo2)
         xorigin = xo2;
     end
-    % 记录开头到这一发真正起点之间有多长空档（秒）。记录长度的一半恒定在触发之前
-    % （XORigin ≡ -记录/2），所以这个数用来说明「触发点相对这一发在哪儿」，
-    % 只作诊断，不参与几何决策。
-    lead_s = NaN;
-    if ~isempty(chTx) && isfinite(xinc) && xinc > 0
-        [s0, ~] = signal_span(chTx, xinc);
-        if ~isempty(s0)
-            lead_s = (s0 - 1) * xinc;
+    % 锚点：这一发在记录里的起点下标。
+    if hwTrig
+        % 独立触发通道：触发时刻就是这一发起点。XORigin ≡ -记录/2，
+        % 所以触发点下标 = round(-XORigin / XINCrement) + 1，一条除法就够。
+        % 不扫波形 —— 与回读幅度无关，回读整段读失败也能取窗。
+        if isfinite(xorigin) && isfinite(xinc) && xinc > 0
+            anchor_i = round(-xorigin / xinc) + 1;
         end
-    end
-    if isempty(chTx) && ~isempty(chPcd)
-        % 回读这一路读失败（read_raw 吞掉异常返回 []）。PCD 是我们要测的那一路，
-        % 不能因为诊断通道毛刺就丢帧：只裁 PCD，okTx=false 交给调用方判断。
-        [~, chPcd] = crop_same(chTx, chPcd, xorigin, xinc, npts, burst_s);
-        crop_mode = 'no-tx';
-    elseif fixed_crop_ok(chTx, xinc, npts)
-        % 定点裁剪：从回读上这一发真正开始的样点起，取满 npts 点。
-        % 改之前用 crop_same「包络到哪算哪」，同一物理量每帧长度都在变，
-        % 而频谱未归一化 → SC 直接跟着帧长抖。
-        [chTx, chPcd] = crop_fixed(chTx, chPcd, xinc, npts);
-        crop_mode = 'fixed';
+        crop_mode = 'trigger';
     else
-        [chTx, chPcd] = crop_same(chTx, chPcd, xorigin, xinc, npts, burst_s);
+        % 靠回读通道的模拟边沿触发：t0 在记录里的位置未知，只能在数据里找包络。
+        if ~isempty(chTx) && isfinite(xinc) && xinc > 0
+            [s0, ~] = signal_span(chTx, xinc);
+            anchor_i = s0;
+        end
         crop_mode = 'span';
+    end
+    n_total = max(numel(chTx), numel(chPcd));
+    if ~isempty(anchor_i) && anchor_i >= 1 && anchor_i + npts - 1 <= n_total
+        [chTx, chPcd] = crop_at(chTx, chPcd, anchor_i, npts);
+    else
+        % 定不出锚点，或记录里装不下 npts 点：退回「按这一发长度裁」，
+        % 并把 crop_mode 标成 fallback —— 这条路的窗起点不可信，日志要能看出来。
+        if strcmp(crop_mode, 'trigger')
+            anchor_i = [];
+        end
+        [chTx, chPcd] = crop_same(chTx, chPcd, xorigin, xinc, npts, burst_s);
+        crop_mode = 'fallback';
     end
     if strcmpi(mode, 'live')
         % 读完重新跑起来，示波器屏幕才不会冻住，下一圈 :RUN 也有新数据可停。
@@ -165,45 +183,22 @@ timeIntervalNanoSeconds = xinc * 1e9;
 restore_timeout(dev, oldT);
 end
 
-function tf = fixed_crop_ok(a, xinc, want_n)
-%FIXED_CROP_OK 能不能定点裁剪：要能在回读上找到这一发的起点，且记录里够长。
-% 找不到就退回 crop_same —— 定点裁剪的前提是「知道 t0 在哪」，不知道就别硬来。
-tf = false;
-if isempty(a) || ~(isfinite(xinc) && xinc > 0)
-    return
-end
-if ~(isfinite(want_n) && want_n >= 256)
-    return
-end
-[i0, ~] = signal_span(a, xinc);
-tf = ~isempty(i0) && i0 + want_n - 1 <= numel(a);
-end
-
-function [a, b] = crop_fixed(a, b, xinc, want_n)
-%CROP_FIXED 定点裁剪：从回读上这一发真正开始的样点起，取满 want_n 点。
-%
-% 起点用 signal_span 在数据里找发射沿，与 crop_same 用同一个判据；
-% 但终点不再「包络到哪算哪」，而是取满 want_n —— want_n = burst_s × fs 由
-% rigol_dho814_capture_geometry 一次定死，所以同一物理量每帧长度完全一致。
-% 改之前长度随包络检测抖动，而 pcd_spectrum 未做长度归一化，SC 就跟着抖。
-n = max(numel(a), numel(b));
-if n < 256
-    return
-end
-[i0, ~] = signal_span(a, xinc);
-if isempty(i0)
-    return
-end
-i0 = min(max(1, i0), max(1, n - 255));
-last = min(n, i0 + want_n - 1);
-if last - i0 + 1 < 256
-    return
-end
+function [a, b] = crop_at(a, b, i0, want_n)
+%CROP_AT 从给定锚点 i0 起取满 want_n 点，两路用同一组下标。
+% 锚点由调用方定（'trigger' 走示波器几何、'span' 走包络检测），这里只按下标切，
+% 不再自己找起点 —— 以前 crop_fixed 内部又扫一次 signal_span，等于把已经算准的锚点
+% 重新用一个有 12 µs 偏置的启发式覆盖掉。
+% 取不满 want_n 的那一路返回 []：上游按 okTx 判断，不要给一个长度不一的半截窗。
+last = i0 + want_n - 1;
 if numel(a) >= last
     a = a(i0:last);
+else
+    a = [];
 end
 if numel(b) >= last
     b = b(i0:last);
+else
+    b = [];
 end
 end
 
@@ -279,11 +274,14 @@ ma = (c((1 + win):end) - c(1:(end - win))) / win;
 pk = max(ma);
 % 门限必须是**相对**的：ma 是 20 µs 滑动平均，正弦包络只有幅度的 ~2/π。
 % 实测 98 mVpp（峰 49 mV）的信号，ma 峰值只有 30.9 mV —— 原来那道
-% `max(0.05, …)` 的绝对 50 mV 门槛是它的 1.6 倍，于是永远判「找不到猝发」：
-% crop_fixed 一次都不命中（crop_mode 恒为 'span'）、lead 恒为 NaN，
+% `max(0.05, …)` 的绝对 50 mV 门槛是它的 1.6 倍，于是永远判「找不到猝发」，
 % 65 mVpp 以下的信号更是连 pk>=0.02 都过不去。
 % 现在用空档里的典型起伏 nz = median(ac) 当噪声底：真猝发的 pk/nz 实测约 130 倍，
 % 纯噪声只有 1 倍出头，所以 6× 既能挡住噪声，又不对幅度设死板下限。
+%
+% 注意这条启发式现在只在**没有独立触发通道**时才用（crop_mode='span'）。
+% 配了硬件触发时锚点由 XORigin/XINCrement 直接算出，不必扫波形 —— 那条路
+% 实测零漂移、误差 64 ns，比这里的 20 µs 平滑窗精确约 190 倍。
 nz = median(ac);
 if ~(isfinite(pk) && isfinite(nz) && pk >= max(0.002, 6 * nz))
     return

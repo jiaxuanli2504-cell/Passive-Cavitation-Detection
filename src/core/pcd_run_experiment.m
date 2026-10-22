@@ -114,6 +114,16 @@ else
     fprintf('两路同一段，最长 %.3f ms（%d 点），不超过脉冲 %.3f ms。\n', ...
         n_req / max(info.realFs, 1) * 1e3, n_req, burst_s * 1e3);
 end
+% 把「窗起点怎么定的」显式打出来：这两种方式的精度和失效条件差一个量级，
+% 出问题时第一眼就该知道用的是哪条。
+if ttlTrig
+    fprintf(['  锚点：独立触发通道 CH%g（硬件触发）→ 窗起点按示波器触发点直接算出，' ...
+        '不扫波形、与回读幅度无关。\n'], round(cfg.scope_trig_channel));
+else
+    fprintf(['  锚点：回读 CH%g 的模拟边沿（电平=设定 Vpp 的 8%%），窗起点靠扫描包络，' ...
+        '有约 12 µs 偏置；回读弱于约 20 mVpp 会失锁 —— 建议接发生器 Trig Out 到空余通道。\n'], ...
+        cfg.scope_tx_channel);
+end
 datamat = [];
 txmat = [];
 Vrec = [];
@@ -399,13 +409,15 @@ result = save_now();
                         label, n_good - n0, left));
                 end
             end
-            [chPcd, ~, realFs, chTx, okTx, ~] = rigol_dho814_acquire_block( ...
+            [chPcd, ~, realFs, chTx, okTx, anchor_i, crop_mode] = rigol_dho814_acquire_block( ...
                 scope, n_req, cfg.scope_pcd_channel, acq_mode, timeout_s, ...
                 p.period_s + 0.08, burst_s);
+            % 锚点来自硬件触发时，窗起点与回读波形无关，回读读失败不该判废这一帧。
+            anchored = strcmp(crop_mode, 'trigger');
             if ~pcd_visa('alive', token)
                 break;
             end
-            if ~frame_ok(chPcd, chTx, okTx, volt)
+            if ~frame_ok(chPcd, chTx, okTx, volt, anchored)
                 n_miss = n_miss + 1;
                 show_live(chTx, chPcd, realFs, do_fb);
                 % 触发电平只按「连续」失败降档，且设下限。改之前 n_miss==1 就降一半，
@@ -425,10 +437,11 @@ result = save_now();
                     wait_note = sprintf('CH%g 未触发，检查发生器后面板到这一路的 BNC', ...
                         round(cfg.scope_trig_channel));
                 elseif ~okTx
-                    % 回读读失败就丢这一帧 —— 不是嫌它数据脏，而是裁窗锚在回读检测到的
-                    % 发射沿上，没有锚点 PCD 的窗就是任意的，入库等于写进错窗的占空比。
-                    wait_note = sprintf('%s 这一帧没读到（USB 毛刺），缺少发射沿锚点，本帧丢弃', ...
-                        pcd_scope_labels().txTag);
+                    % 只在「靠回读边沿触发」这条路上才会因为回读读失败丢帧：
+                    % 那时锚点来自回读上的包络沿，没有回读就没有起点。
+                    % 配了硬件触发通道时锚点在示波器几何里，这一帧照常入库（上面已放行）。
+                    wait_note = sprintf(['%s 这一帧没读到（USB 毛刺），当前靠回读边沿定锚点，' ...
+                        '本帧丢弃；配独立触发通道可避免'], pcd_scope_labels().txTag);
                 else
                     wait_note = sprintf('%s 仍在等发生器这一发，不采空档', ...
                         pcd_scope_labels().txTag);
@@ -917,23 +930,34 @@ else
 end
 end
 
-function tf = frame_ok(chPcd, chTx, okTx, volt_mVpp)
-%FRAME_OK 这一帧能不能入库。判据是**相对本发电压**的，不是绝对毫伏。
+function tf = frame_ok(chPcd, chTx, okTx, volt_mVpp, anchored)
+%FRAME_OK 这一帧能不能入库。
 %
-% 改之前是 swing > 0.2（200 mVpp）|| acrms > 0.02（20 mVrms），与这一发实际打多大
-% 无关。正弦 acrms = Vpp/2√2，所以回读低于 ≈56.6 mVpp 就恒判 false —— 而假超声档
-% 本来就设计成低电压（代码注释里把文献的 18 mVpp 当合法工作点）。后果：整轮 0 帧，
-% 最后抛「基线没有采到有效 CH2 帧」，错误信息指不到真因。
+% 两条路，判据不同，因为「窗起点是怎么定下来的」不同：
 %
-% 现在：门限 = 本发电压的一个小比例，并保留绝对下限防止 volt 未知时退化成
-% 「有噪声就算过」。
+%   anchored = true（crop_mode='trigger'，配了独立触发通道）
+%       窗起点由示波器几何给出（i0 = round(-XORigin/XINCrement)+1），与回读波形无关。
+%       所以只要 PCD 有内容就入库：回读读失败（USB 毛刺）不该带走一帧完好的数据，
+%       这也是硬件触发相对「盯正弦」最大的实际收益之一。
 %
-% 回读读失败时仍然丢帧 —— 不是因为它「数据脏」，而是因为**没有回读就没有猝发起点**：
-% 裁窗锚在回读检测到的发射沿上（crop_fixed / crop_same），丢了锚点 PCD 的窗就是
-% 任意的，入库等于把错窗的占空比写进 SC。所以这里丢帧是对的，真正要修的是别因为
-% 单帧失败就把触发电平棘轮下去（见 run_loop）。
+%   anchored = false（'span' / 'fallback'，靠回读通道的模拟边沿触发）
+%       窗锚在回读检测到的包络沿上，没有回读就没有起点 —— 这时丢帧是对的，
+%       入库等于把错窗的占空比写进 SC。
+%       门限取**相对**本发电压的一个小比例，并保留绝对下限防止 volt 未知时
+%       退化成「有噪声就算过」。改之前是 swing > 0.2（200 mVpp）|| acrms > 0.02
+%       （20 mVrms），与这一发实际打多大无关：正弦 acrms = Vpp/2√2，所以回读低于
+%       ≈56.6 mVpp 就恒判 false，而假超声档本来就设计成低电压（文献的 18 mVpp
+%       是合法工作点）。后果是整轮 0 帧，最后抛「基线没有采到有效 CH2 帧」，
+%       错误信息指不到真因。
+if nargin < 5 || isempty(anchored)
+    anchored = false;
+end
 if isempty(chPcd) || numel(chPcd) < 256
     tf = false;
+    return
+end
+if anchored
+    tf = true;
     return
 end
 if nargin >= 3 && ~okTx
