@@ -94,6 +94,10 @@ P.dbg_volt = pickn(src, 'dbg_volt', raw, 'dbg_volt');
 
 % —— 影响波形的仪器设置（通道、50 Ω 负载、WORD/RAW、量程格数）
 P.awg_channel = pickn(src, 'awg_channel', cfg, 'awg_channel');
+% 回读镜像通道（0 = 不镜像）。存档必须记下来：回读幅度的绝对值取决于镜像通道接的
+% 是什么负载 —— 50 Ω 源驱动高阻示波器会显示 2× 设定值，而主通道进 50 Ω 功放是 1×。
+% 不记这一项，事后没人能从数据里推出电压轴的换算关系。
+P.awg_monitor_channel = pickn(src, 'awg_monitor_channel', cfg, 'awg_monitor_channel');
 P.awg_load_ohm = pickn(src, 'awg_load_ohm');
 if ~isfinite(P.awg_load_ohm)
     P.awg_load_ohm = 50;  % rigol_dg2052_load 固定 50 Ω，幅度按低阻解释

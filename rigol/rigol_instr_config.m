@@ -76,6 +76,15 @@ cfg.scope_pcd_channel = 2;   % PCD
 cfg.scope_channel     = 2;   % 兼容旧代码：默认采 PCD
 cfg.scope_trig_channel = 0;  % 0 = 用回读通道触发；1–4 = 单独的触发通道（发生器后面板接到这一路）
 cfg.awg_channel       = 1;
+% 回读镜像通道：回读那一路接在发生器的哪个通道上（0 = 不镜像）。
+%
+% 为什么需要它：示波器的回读通道如果接在发生器的**另一个**通道上，那个通道必须发出
+% 与主通道同一个猝发，否则它停在出厂默认（1 kHz / 5 Vpp / 输出关），回读全是噪声。
+% 设成 2 时：rigol_dg2052_apply_burst 会把同一套频率/幅度/周期数写给 CH2，并把它的
+% 猝发触发源设为外触发 —— 由 CH1 后面板 TrigOut 启动，两路同起点。
+% 前提接线：CH1 后面板 TrigOut 一分二，一路到 CH2 的 [Sync/Ext Mod/Trig/FSK]，
+% 一路到示波器的触发通道。0 时不动 CH2（回读来自 CH1 的 T 型分路或根本不用回读）。
+cfg.awg_monitor_channel = 0;
 % computer：电脑控制 DG2052，可闭环。manual：另一台发生器手调，电脑不连、不闭环。
 cfg.awg_mode          = 'computer';
 
@@ -98,8 +107,8 @@ if ~isfile(f)
     return;
 end
 % 只接受白名单键，避免误改内部字段
-numKeys = {'scope_tx_channel', 'scope_pcd_channel', 'scope_trig_channel', 'awg_channel', 'acquire_timeout_s', ...
-    'harmonic_bandwidth_hz', 'scope_vdiv'};
+numKeys = {'scope_tx_channel', 'scope_pcd_channel', 'scope_trig_channel', 'awg_channel', ...
+    'awg_monitor_channel', 'acquire_timeout_s', 'harmonic_bandwidth_hz', 'scope_vdiv'};
 strKeys = {'scope_visa', 'awg_visa', 'awg_mode'};
 try
     lines = splitlines(fileread(f));
@@ -150,12 +159,13 @@ txt = sprintf([ ...
     'scope_pcd_channel=%g\n' ...
     'scope_trig_channel=%g\n' ...
     'awg_channel=%g\n' ...
+    'awg_monitor_channel=%g\n' ...
     'acquire_timeout_s=%g\n' ...
     'harmonic_bandwidth_hz=%g\n' ...
     'scope_vdiv=%g\n'], ...
     char(cfg.scope_visa), char(cfg.awg_visa), awg_mode_of(cfg), ...
     cfg.scope_tx_channel, cfg.scope_pcd_channel, cfg.scope_trig_channel, cfg.awg_channel, ...
-    cfg.acquire_timeout_s, cfg.harmonic_bandwidth_hz, cfg.scope_vdiv);
+    cfg.awg_monitor_channel, cfg.acquire_timeout_s, cfg.harmonic_bandwidth_hz, cfg.scope_vdiv);
 fid = fopen(f, 'w');
 if fid < 0
     error('rigol:config:write', '无法写入配置文件：%s', f);
