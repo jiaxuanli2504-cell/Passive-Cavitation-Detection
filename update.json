@@ -1,1 +1,1 @@
-{"version":"0.1.7","url":"https://github.com/AsagiriBeta/Public-Feedback-Control/releases/download/v0.1.7/PFC_Installer_v0.1.7.exe","notes":"与 0.1.6 功能相同，仅回退了一处削顶判定的改动：0.1.6 误带了一个未经确认的判据实现修改，现恢复为已完成仪器实测的那份原始实现，保证程序与实验验证过的代码完全一致。正在用本软件做实验的机器请装这一版。功能和参数没有任何其他变化。"}
+{"version":"0.1.8","url":"https://github.com/AsagiriBeta/Public-Feedback-Control/releases/download/v0.1.8/PCD_Installer_v0.1.8.exe","notes":"新增激励回读镜像通道：信号发生器第二路同步复制主路，闭环与 CW 调试的回读 FFT 都能看到 f0 峰，回读电平不再高报一倍；界面内置本实验室接线说明并按仪器配置自动生成。采集侧改用示波器实测触发几何定位猝发，修掉定点裁剪在真实信号下从不生效、采集窗随猝发长度漂移与触发电平棘轮等问题，帧率提升到约 2.7 帧/s。另修正更新源指向的仓库地址。"}
