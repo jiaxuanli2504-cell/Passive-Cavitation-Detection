@@ -282,7 +282,7 @@ end
 
 if strcmp(act, 'feedback') && pcd_scope_labels().manual
     pcd_ui_push(fig, struct('cmd', 'status', 'text', ...
-        '手动信号源不做闭环。请在发生器上自己调电压，用「3 开环」只采集。'));
+        '手动信号源不做闭环。请在发生器上自己调电压，用「开环」只采集。'));
     return;
 end
 
@@ -326,10 +326,7 @@ try
     switch act
         case 'oneshot',  pcd_oneshot(ui);
         case 'debug',    pcd_debug_run(ui);
-        case 'noMB'
-            warn_amp(fig);
-            pcd_run_experiment('before', ui);
-        case 'openMB'
+        case {'noMB', 'openMB'}
             warn_amp(fig);
             pcd_run_experiment('open_mb', ui);
         case 'feedback'
@@ -379,25 +376,22 @@ tf = contains(msg, 'invalid', 'IgnoreCase', true) || ...
 end
 
 function warn_amp(fig)
-%WARN_AMP 2/3/4 起步时一行状态提醒开功放。不要弹窗——连点会堆成风暴。
+%WARN_AMP 起步时立刻改状态行。功放要用户事先打开，这行不能写成还在等用户。
 S = getappdata(fig, 'pcd_params');
 g = 40;
 if isstruct(S) && isfield(S, 'amp_gain') && isnumeric(S.amp_gain) && isfinite(S.amp_gain)
     g = double(S.amp_gain);
 end
-if g >= 40
-    pcd_ui_push(fig, struct('cmd', 'status', 'text', sprintf('确认功放已开 ×%.4g', g)));
-end
+pcd_ui_push(fig, struct('cmd', 'status', 'text', ...
+    sprintf('已开始。正在打开发生器，功放保持 ×%.4g。', g)));
 end
 
 function t = step_tab(act)
-% 前端步骤页签名：调试 / 2 无微泡 / 3 开环 / 4 闭环
+% 前端步骤页签名：调试 / 开环 / 闭环
 switch act
     case {'oneshot', 'debug'}
         t = 'debug';
-    case 'noMB'
-        t = 'nomb';
-    case 'openMB'
+    case {'noMB', 'openMB'}
         t = 'open';
     case 'feedback'
         t = 'fb';

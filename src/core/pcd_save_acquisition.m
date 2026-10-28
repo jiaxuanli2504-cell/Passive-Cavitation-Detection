@@ -41,7 +41,12 @@ if ~isfolder(rundir)
 end
 
 rawfile = fullfile(rundir, 'raw.mat');
-save(rawfile, '-struct', 'S', '-v7.3');
+% v7.3 要压成 HDF5，几十兆的波形要多等好几秒。2 GB 以内用 v7，结束时按钮能早点松开。
+try
+    save(rawfile, '-struct', 'S', '-v7');
+catch
+    save(rawfile, '-struct', 'S', '-v7.3');
+end
 
 if isfield(S, 'params') && isstruct(S.params)
     try

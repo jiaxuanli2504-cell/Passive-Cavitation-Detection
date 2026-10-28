@@ -79,9 +79,8 @@ function [f_pk, db_pk] = html_waveform(fig, y, fs, f0, nm, opts)
 % 时域窗为什么要分两种：
 %   TX 正弦：调试 CW 几万点里叠几百个周期，整段再抽点会抽成一条实心带，
 %            所以截 ~16 个驱动周期（约 10.7 µs @ 1.5 MHz）再降采样。
-%   PCD / 无微泡底噪：没有周期可截。若仍按 16 周期去围 max(|y|)，会放大
-%            一个随机毛刺，横轴变成几纳秒、幅度 ±1 mV，看起来像坏了。
-%            宽带一律整段记录降采样（≤ MAXP 点），一眼能看到猝发是否在窗内。
+%   长脉冲（>0.5 ms）：屏幕只画触发后开头 10 个周期，否则近万个周期糊成色块。
+%   PCD 短记录：没有周期可截。若仍按 16 周期去围 max(|y|)，会放大一个随机毛刺。
 % f0 约定 MHz、fs 约定 Hz；若明显按 Hz / MSa/s 误传，这里先折回来，避免
 % 16/1.5e6 → nwin=2 → 横轴只剩一个采样间隔（@125 MSa/s 正好 ~8 ns）。
 % FFT：Nyquist 常到 20–30 MHz，横轴只放到 min(Nyquist, max(8, 5*f0)) MHz。
@@ -114,8 +113,11 @@ if do_fft
     [f_pk, db_pk] = pcd_fft_peak_mhz(F, db, 0.3, 8);
 end
 
-% --- 时域展示窗：正弦先截连续短段再抽点；宽带整段抽点（顺序不能反） ---
-[dt_us, yw] = time_view(y, fs, f0, kind, MAXP);
+% --- 时域展示窗：短记录截一段正弦；长脉冲只画开头几个周期，避免整段连成色块 ---
+[dt_us, yw, note] = time_view(y, fs, f0, kind, MAXP);
+if ~isempty(note)
+    nm = sprintf('%s  %s', char(string(nm)), note);
+end
 pp_mV = (max(y) - min(y)) * 1e3;
 
 S = struct('cmd', 'waveform', ...
@@ -152,10 +154,27 @@ end
 pcd_ui_push(fig, S);
 end
 
-function [dt_us, yw] = time_view(y, fs, f0, kind, MAXP)
+function [dt_us, yw, note] = time_view(y, fs, f0, kind, MAXP)
 n = numel(y);
+note = '';
 broad = any(strcmp(kind, {'broad', 'pcd', 'noise'}));
 if broad
+    if n / fs > 0.5e-3
+        % 6 ms 里近万个周期，整段抽点或逐段画最大最小都会糊成色块。
+        % 屏幕只看触发后开头 10 个周期；整段有没有铺满，看保存的峰峰值图。
+        ncy = 10;
+        if ~(isfinite(f0) && f0 > 0)
+            f0 = 1.5;
+        end
+        nwin = max(32, round(ncy / (f0 * 1e6) * fs));
+        nwin = min(n, nwin);
+        step = max(1, ceil(nwin / MAXP));
+        ti = 1:step:nwin;
+        dt_us = (ti - 1) / fs * 1e6;
+        yw = y(ti);
+        note = '开头 10 周期';
+        return
+    end
     % 整段降采样：无微泡 PCD 是底噪，截 16 个「周期」只会画出一个毛刺
     i0 = 1;
     i1 = n;

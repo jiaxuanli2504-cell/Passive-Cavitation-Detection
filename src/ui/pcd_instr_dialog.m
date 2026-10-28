@@ -14,7 +14,7 @@ S = struct('devs', []);
 fn = ui_font();
 
 fig = uifigure('Name', '仪器设置 / Instruments', ...
-    'Color', C.fig, 'Position', [100 60 780 700], ...
+    'Color', C.fig, 'Position', [100 60 780 730], ...
     'Resize', 'on', 'WindowStyle', 'alwaysontop', 'Visible', 'off');
 fig.CloseRequestFcn = @(src, ~) delete(src);
 
@@ -23,7 +23,7 @@ g.BackgroundColor = C.fig;
 g.Padding = [14 12 14 12];
 g.RowSpacing = 8;
 % 第 8 行放触发/镜像通道，第 9 行放接线说明（接错不报错，必须写在用户会看的地方）
-g.RowHeight = {28, 36, '1x', 36, 34, 34, 34, 34, 132, 40};
+g.RowHeight = {28, 36, '1x', 36, 34, 34, 34, 34, 168, 40};
 
 hint = uilabel(g, 'Text', ...
     '先「扫描仪器」；空栏会自动填入识别到的型号。已有地址请选中后点「设为」。', ...
@@ -63,30 +63,37 @@ row7.BackgroundColor = C.fig;
 row7.Padding = [0 0 0 0];
 row7.ColumnWidth = {'fit', 'fit', 'fit', '1x'};
 row7.ColumnSpacing = 20;
-tx_sp  = mk_ch_pair(row7, C, fn, '回读 CH', cfg.scope_tx_channel, [1 4]);
-pcd_sp = mk_ch_pair(row7, C, fn, 'PCD CH', cfg.scope_pcd_channel, [1 4]);
-awg_sp = mk_ch_pair(row7, C, fn, '信号源 CH', cfg.awg_channel, [1 2]);
+tx_sp   = mk_ch_pair(row7, C, fn, '示波器 回读', cfg.scope_tx_channel, [1 4]);
+pcd_sp  = mk_ch_pair(row7, C, fn, '示波器 PCD', cfg.scope_pcd_channel, [1 4]);
+trig_sp = mk_ch_pair(row7, C, fn, '示波器 触发', cfg.scope_trig_channel, [0 4]);
+uilabel(row7, 'Text', '触发 0=用回读边沿', ...
+    'FontColor', C.muted, 'FontName', fn, 'FontSize', 10);
 
 % 触发通道与回读镜像：这两个值决定了整套接线，
 % 以前只能改 ini，界面上看不到也就没法对照接线。
-row8 = uigridlayout(g, [1 4]);
+row8 = uigridlayout(g, [1 3]);
 row8.Layout.Row = 8;
 row8.BackgroundColor = C.fig;
 row8.Padding = [0 0 0 0];
 row8.ColumnWidth = {'fit', 'fit', '1x'};
 row8.ColumnSpacing = 20;
-trig_sp = mk_ch_pair(row8, C, fn, '触发 CH', cfg.scope_trig_channel, [0 4]);
-mon_sp  = mk_ch_pair(row8, C, fn, '回读镜像', cfg.awg_monitor_channel, [0 2]);
-uilabel(row8, 'Text', '触发 0=用回读边沿；回读镜像 0=不启用', ...
+awg_sp = mk_ch_pair(row8, C, fn, '发生器 输出', cfg.awg_channel, [1 2]);
+mon_sp = mk_ch_pair(row8, C, fn, '发生器 镜像', cfg.awg_monitor_channel, [0 2]);
+uilabel(row8, 'Text', '镜像 0=不启用', ...
     'FontColor', C.muted, 'FontName', fn, 'FontSize', 10);
 
-% 接线说明：由 pcd_wiring 按上面四个通道号生成，改通道后这几行会跟着变。
-wl = pcd_scope_labels();
-wire = uilabel(g, 'Text', ['　接线（本实验室这套仪器）' newline wl.wiringText], ...
+% 接线说明跟着上面的通道号变，不读已经保存的 ini。
+wire = uilabel(g, 'Text', '', ...
     'FontColor', C.text, 'FontName', fn, 'FontSize', 11, ...
     'WordWrap', 'on', 'VerticalAlign', 'top');
 wire.Layout.Row = 9;
 wire.BackgroundColor = C.editBg;
+tx_sp.ValueChangedFcn = @(~, ~) refresh_wire();
+pcd_sp.ValueChangedFcn = @(~, ~) refresh_wire();
+trig_sp.ValueChangedFcn = @(~, ~) refresh_wire();
+awg_sp.ValueChangedFcn = @(~, ~) refresh_wire();
+mon_sp.ValueChangedFcn = @(~, ~) refresh_wire();
+refresh_wire();
 
 row_btn = uigridlayout(g, [1 3]);
 row_btn.Layout.Row = 10;
@@ -217,6 +224,17 @@ uiwait(fig);
         else
             stat.FontColor = C.warn;
         end
+    end
+
+    function refresh_wire()
+        c = cfg;
+        c.scope_tx_channel = round(tx_sp.Value);
+        c.scope_pcd_channel = round(pcd_sp.Value);
+        c.scope_trig_channel = round(trig_sp.Value);
+        c.awg_channel = round(awg_sp.Value);
+        c.awg_monitor_channel = round(mon_sp.Value);
+        [~, note] = pcd_wiring(c);
+        wire.Text = ['　接线（本实验室这套仪器）' newline note];
     end
 
     function do_save()

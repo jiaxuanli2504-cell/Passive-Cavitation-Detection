@@ -62,15 +62,32 @@ for i = 1:numel(depth_tags)
         catch
         end
         pause(0.05);
+        % 必须在 RAW 下读点数和间隔。不设的话读到的是屏幕波形，触后窗口比内存短一截，
+        % 规划会把其实装得下的时基判失败（这台机器 100k、200 µs/div：屏幕触后 1.0 ms，
+        % 内存触后 1.6 ms、31.25 MSa/s）。不写 STARt/STOP，这台固件一写就 -200。
+        try
+            writeline(dev, ':WAVeform:SOURce CHANnel1');
+            writeline(dev, ':WAVeform:MODE RAW');
+        catch
+        end
         fs = qnum(dev, ':ACQuire:SRATe?');
         n  = qnum(dev, ':WAVeform:POINts?');
         xi = qnum(dev, ':WAVeform:XINCrement?');
+        xo = qnum(dev, ':WAVeform:XORigin?');
         if ~(isfinite(fs) && fs > 0 && isfinite(n) && n >= 256 && isfinite(xi) && xi > 0)
             continue
         end
         rec = n * xi;
+        % 触发后还能用多少，以 XORigin 为准。这台固件并不总是把触发点放在记录正中。
+        post = rec / 2;
+        if isfinite(xo)
+            post_xo = xo + (n - 1) * xi;
+            if isfinite(post_xo) && post_xo > 0
+                post = post_xo;
+            end
+        end
         T(end+1) = struct('depth_tag', md, 'depth_pts', d_pts, 'div_s', divs(j), ...
-            'fs', fs, 'record_s', rec, 'post_s', rec / 2); %#ok<AGROW>
+            'fs', fs, 'record_s', rec, 'post_s', post); %#ok<AGROW>
     end
 end
 

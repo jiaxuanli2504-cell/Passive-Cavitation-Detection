@@ -19,8 +19,8 @@ pcd_visa_state = ensure_state(pcd_visa_state);
 
 switch lower(cmd)
     case 'scope'
-        pcd_visa_state.scope = reuse_visadev(pcd_visa_state.scope, ...
-            rigol_instr_config().scope_visa);
+        cfg = live_cfg();
+        pcd_visa_state.scope = reuse_visadev(pcd_visa_state.scope, cfg.scope_visa);
         varargout{1} = pcd_visa_state.scope;
     case 'fgen'
         if pcd_scope_labels().manual
@@ -28,8 +28,8 @@ switch lower(cmd)
                 ['当前是手动信号源：电脑不连接发生器，也不改它的电压。\n' ...
                  '请在发生器面板上设置，或把主界面的信号源改回「电脑控制 DG2052」。']);
         end
-        pcd_visa_state.fgen = reuse_visadev(pcd_visa_state.fgen, ...
-            rigol_instr_config().awg_visa);
+        cfg = live_cfg();
+        pcd_visa_state.fgen = reuse_visadev(pcd_visa_state.fgen, cfg.awg_visa);
         fgen = pcd_visa_state.fgen;
         varargout{1} = pcd_visa_state.fgen;
     case 'rf_off'
@@ -225,6 +225,55 @@ try
     tf = isvalid(dev);
 catch
     tf = false;
+end
+end
+
+function cfg = live_cfg()
+% 配置里的序列号不在总线上时，改用现在扫到的同型号，并写回 ini。
+% 否则点「开始」会报 resource was not found，界面像没反应。
+cfg = rigol_instr_config();
+try
+    listed = visadevlist;
+catch
+    return;
+end
+if isempty(listed) || ~isfield(cfg, 'scope_visa')
+    return;
+end
+names = string(listed.ResourceName);
+changed = false;
+if ~visa_listed(names, cfg.scope_visa)
+    hit = names(contains(upper(names), "0X044D"));
+    if numel(hit) == 1
+        cfg.scope_visa = char(hit(1));
+        changed = true;
+    end
+end
+if ~visa_listed(names, cfg.awg_visa)
+    hit = names(contains(upper(names), "0X0644"));
+    if numel(hit) == 1
+        cfg.awg_visa = char(hit(1));
+        changed = true;
+    end
+end
+if changed
+    rigol_instr_config('save', cfg);
+    warning('pcd:visa:retarget', ...
+        '配置里的仪器没插上，已改用当前扫描到的示波器和发生器。');
+end
+end
+
+function tf = visa_listed(names, addr)
+tf = false;
+addr = strtrim(char(string(addr)));
+if isempty(addr)
+    return;
+end
+for i = 1:numel(names)
+    if rigol_visa_same(names(i), addr)
+        tf = true;
+        return;
+    end
 end
 end
 

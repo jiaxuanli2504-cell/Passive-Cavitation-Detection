@@ -125,16 +125,23 @@ try
         writeline(dev, ':STOP');
     end
 
-    % 两路各读整段内存，再裁同一段。
-    % 不写 STARt/STOP：这台固件一写就 -200，屏幕报远程指令执行错误。
-    [chTx, xinc, xorigin] = read_raw(dev, tx, npts);
-    [chPcd, x2, xo2] = read_raw(dev, ch, npts);
+    % 两路尽量只读触发后这一发。读窗口被固件拒绝时 i0 为空，下面仍按整段内存裁。
+    [chTx, xinc, xorigin, i0] = read_raw(dev, tx, npts);
+    [chPcd, x2, xo2, ~] = read_raw(dev, ch, npts, i0);
     if ~(isfinite(xinc) && xinc > 0) && isfinite(x2) && x2 > 0
         xinc = x2;
     end
     if ~(isfinite(xorigin)) && isfinite(xo2)
         xorigin = xo2;
     end
+    % 已经是触发点起的这一发：不要再用内存下标裁一次，否则起点会落到数组外面。
+    if ~isempty(i0) && numel(chTx) >= npts && numel(chPcd) >= npts ...
+            && numel(chTx) <= npts + 4 && numel(chPcd) <= npts + 4
+        chTx = chTx(1:npts);
+        chPcd = chPcd(1:npts);
+        anchor_i = 1;
+        crop_mode = 'trigger';
+    else
     % 锚点：这一发在记录里的起点下标。
     if hwTrig
         % 独立触发通道：触发时刻就是这一发起点。XORigin ≡ -记录/2，
@@ -163,6 +170,7 @@ try
         end
         [chTx, chPcd] = crop_same(chTx, chPcd, xorigin, xinc, npts, burst_s);
         crop_mode = 'fallback';
+    end
     end
     if strcmpi(mode, 'live')
         % 读完重新跑起来，示波器屏幕才不会冻住，下一圈 :RUN 也有新数据可停。
@@ -298,13 +306,16 @@ if i1 - i0 + 1 < 256
 end
 end
 
-function [y, xinc, xorigin] = read_raw(dev, ch, npts)
+function [y, xinc, xorigin, i0] = read_raw(dev, ch, npts, i0)
 y = [];
 xinc = NaN;
 xorigin = NaN;
+if nargin < 4
+    i0 = [];
+end
 for attempt = 1:2
     try
-        [y, xinc, xorigin] = rigol_dho814_read_channel(dev, ch, npts, 'RAW');
+        [y, xinc, xorigin, i0] = rigol_dho814_read_channel(dev, ch, npts, 'RAW', i0);
         return
     catch
         try
@@ -312,6 +323,7 @@ for attempt = 1:2
             writeline(dev, ':STOP');
         catch
         end
+        i0 = [];
     end
 end
 end

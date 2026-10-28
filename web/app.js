@@ -157,8 +157,8 @@
     var tgt = u.__tgt_db;
     if (!(typeof tgt === 'number' && isFinite(tgt))) { return; }
     var bb = u.bbox;
-    var y0 = u.valToPos(tgt - 0.4, 'y', true);
-    var y1 = u.valToPos(tgt + 0.4, 'y', true);
+    var y0 = u.valToPos(tgt - 0.2, 'y', true);
+    var y1 = u.valToPos(tgt + 0.2, 'y', true);
     var ym = u.valToPos(tgt, 'y', true);
     var ctx = u.ctx;
     ctx.save();
@@ -183,19 +183,19 @@
     volt: '#ch-volt', sc: '#ch-sc', ic: '#ch-ic'
   };
   var CHART_KEYS = ['timeTx', 'timePcd', 'fftTx', 'fftPcd', 'volt', 'sc', 'ic'];
-  var STEP_TABS = { debug: 1, nomb: 1, open: 1, fb: 1 };
+  var STEP_TABS = { debug: 1, open: 1, fb: 1 };
   var ACTION_TAB = {
     oneshot: 'debug', debug: 'debug',
-    noMB: 'nomb', openMB: 'open', feedback: 'fb'
+    noMB: 'open', openMB: 'open', feedback: 'fb'
   };
 
   /* ---------------- 采样点 / 周期数软件上下限 ---------------- */
   /* 必须与 src/core/pcd_param_limits.m、web/index.html 的 min/max 保持同一套数字。
-   * 上限 100000：100k WORD × 2 通道，40 MSa/s ≈ 2.5 ms 窗，USB 仍可接受（旧实验上限 50k 的 2 倍）。
+   * 上限 1000000：6.660 ms 脉冲要 1M 深度才装得下（100k 触发后只有 4 ms）。
    * 周期数 10000：与 pcd_param_limits.n_cycle_max 一致。不要按假 40 MSa/s 窗再压到 3000。
    * 超限必须在输入时截断并写回 x-model，否则框里仍显示 400000 / 9990，MATLAB 却按上限跑，
    * 截图会骗人。低于下限只在失焦/回车时截（逐键输入 40000 时中间的 4、40、400 还不能截）。 */
-  var NPTS_MIN = 4096, NPTS_MAX = 100000;
+  var NPTS_MIN = 4096, NPTS_MAX = 1000000;
   var NCYC_MIN = 1, NCYC_MAX = 10000;
   var AMP_GAIN_MIN = 1, AMP_GAIN_DEFAULT = 40;
 
@@ -236,7 +236,7 @@
   function defaultParams() {
     var p = {
       studyID: '', directory: '',
-      dbg_freq: 1.5, dbg_volt: 20,
+      dbg_freq: 1.5, dbg_volt: 20, dbg_drive: 'cw',
       freq_mhz: 1.5, volt_mVpp: 50, amp_gain: 40, prf_hz: 2, n_cycle: 400,
       cav_pct: 100 * 400 * 2 / 1.5e6, duration_s: 120, npts: 40000,
       target_db: 2, ic_limit_db: 1, max_mVpp: 120, base_mVpp: 100, vstep_mVpp: 5,
@@ -262,7 +262,7 @@
       _cdSyncAt: 0,
       _cdSyncRemain: 0,
       _cdTotal: 0,
-      tab: 'debug',          // 步骤页：debug / nomb / open / fb（不是波形/趋势）
+      tab: 'debug',          // 步骤页：debug / open / fb（不是波形/趋势）
       runTab: '',            // 正在跑的步骤；切去看别的页时那个页签仍带 run 标记
       awgMode: 'computer',   // computer=DG2052；manual=面板手控，电脑不连、不闭环
       chTx: 1,
@@ -410,22 +410,24 @@
       // 动作事件带上点击那一刻的表单值：MATLAB 侧会先合并再跑，
       // 这样即使某个 params 事件还在路上，实验用的也是界面上看到的参数。
       action: function (name) {
-        this.clampCaps(true);
-        this.syncCavFromNcycle();
+        try {
+          this.clampCaps(true);
+          this.syncCavFromNcycle();
+        } catch (e) {
+          this.status = '参数读不出来，开始没有发出去。';
+          this.busy = false;
+          return;
+        }
         if (bridge.comp && !this.paramsReady && ACTION_TAB[name]) {
           this.status = '参数尚未从 MATLAB 加载，请等「目标」框显示存档值再开闭环。';
           return;
         }
-        // 已经在跑就不要再发 start：连点 / 页面闪一下 busy 丢失都会变成对话框风暴。
-        if (ACTION_TAB[name] && this.busy) {
-          if (this.runTab) { this.setTab(this.runTab); }
-          return;
-        }
-        // 点步骤按钮立刻切到该步骤页，不必等 MATLAB 回 busy。
-        if (ACTION_TAB[name] && !this.busy) {
-          this.busy = true;          // 乐观锁：按钮立刻变成 STOP / disabled
+        // 点了就必须有一行字。busy 若卡在上一次，静默 return 会让之后每一次点击都像没反应。
+        if (ACTION_TAB[name]) {
+          this.status = this.busy ? '再发一次启动。若上一轮还在，会提示正在采集。' : '已收到，正在启动…';
           this.runTab = ACTION_TAB[name];
           this.setTab(this.runTab);
+          this.busy = true;
         }
         toMatlab('action', { name: name, params: this.p });
       },
@@ -480,6 +482,15 @@
         var t = Math.abs(vpp) >= 1 ? vpp.toFixed(1) : vpp.toFixed(2);
         var who = this.tab === 'fb' ? '上限 ' : '发生器 ';
         return who + v + ' mVpp ×' + g + ' → ' + t + ' Vpp';
+      },
+      pulseHint: function () {
+        var f = Number(this.p.dbg_freq), n = Number(this.p.n_cycle), prf = Number(this.p.prf_hz);
+        if (!isFinite(f) || f <= 0 || !isFinite(n) || n <= 0) {
+          return '脉冲：请先填写频率和左边的周期数。';
+        }
+        var ms = n / (f * 1e6) * 1e3;
+        var prfTxt = (isFinite(prf) && prf > 0) ? prf : 2;
+        return '脉冲  ' + Math.round(n) + ' 周期  ' + ms.toFixed(3) + ' ms  PRF ' + prfTxt + ' Hz';
       },
       awgHint: function () {
         if (this.awgMode === 'manual') {

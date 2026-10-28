@@ -21,9 +21,10 @@ function G = rigol_dho814_capture_geometry(burst_s, f0_hz, fs_target, npts, npts
 %   T         rigol_dho814_probe_timing 的实测输出
 %   margin    触后窗口相对猝发的余量（默认 1.15）
 %
-% 采样率下限为什么是 10.06×f0：pcd_cav_bands 的参考底带最高到 3.87×f0，
-% IC 宽带到 2.5×f0，这些带都要落在 Nyquist 内并留 30% 余量。
-% 低于它就 pcd_band_energy 会把频带 clamp 到 Nyquist 并退化成单 bin，且不报错。
+% 采样率下限是 7.74×f0：pcd_cav_bands 的参考底最高到 3.87×f0，Nyquist 必须盖住它。
+% 以前再乘 1.3（1.5 MHz 就要 15.1 MSa/s）。这台 DHO814 的 100k 深度没有这一档：
+% 31.25 MSa/s 的触后窗口只有 1.6 ms，再长一档就掉到 12.5 MSa/s、触后 4 ms。
+% 12.5 的 Nyquist 是 6.25 MHz，仍高于 3.87×1.5 = 5.805 MHz。再卡 15.1，稍长的脉冲会报装不下。
 %
 % 选档策略：先取「能满足 fs 下限 + 触后窗口」的**最小深度档**（传输量 = 深度档，
 % 这是帧率的唯一瓶颈），再在该深度档内取 fs 最接近 fs_target 的实测档位。
@@ -189,10 +190,10 @@ end
 end
 
 function fs = fs_bands_min(f0_hz)
-%FS_BANDS_MIN 让 pcd_cav_bands 的所有频带都落在 Nyquist 内、并留 30% 余量。
+%FS_BANDS_MIN Nyquist 盖住参考底 3.87×f0 即可。不要再乘 1.3，见文件头的说明。
 if ~(isscalar(f0_hz) && isfinite(f0_hz) && f0_hz > 0)
-    fs = 15.1e6;
+    fs = 11.6e6;
     return;
 end
-fs = 2 * 3.87 * f0_hz * 1.3;
+fs = 2 * 3.87 * f0_hz;
 end

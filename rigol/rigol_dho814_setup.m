@@ -32,34 +32,19 @@ try, writeline(dev, '*CLS'); catch, end
 % 换了时基/深度/通道，波形几何缓存必须整清，否则读到的是上一轮的刻度。
 rigol_dho814_wf_geom('reset');
 
-% 采集几何：由「猝发长度 + 分析频带 + 传输预算」决定，但**必须实测**。
-% 不能按公式算 realFs = 深度/记录：DHO814（固件 00.01.04）的采样率是离散档位，
-% 而且 :WAVeform:XORigin 恒等于 -记录/2 —— 触发点固定在记录正中央，
-% HREFerence LB 对内存记录无效。能装这一发的只有触发之后那一半，即
-%   可用触后窗口 = 记录/2 = MDEPth/(2·SRATe)
-% 所以先按需逐档探测真实档位表，再用它规划。详见 rigol_dho814_probe_timing
-% 与 rigol_dho814_capture_geometry。
+% 采集几何不再逐档试。这台 DHO814 做实验就一套：
+% 深度 1M、2 ms/div、31.25 MSa/s、触发后 16 ms。6.660 ms 从触发点裁。
+% 以前这里 RUN/STOP 扫 8 个时基，点了开始要空等十几秒。
 geom = [];
 if nargin < 8 || isempty(f0_hz) || ~isfinite(f0_hz) || f0_hz <= 0
     f0_hz = 1.5e6;   % 与 pcd_cav_bands 的默认一致
-end
-try
-    L = pcd_param_limits();
-    npts_max = L.npts_max;
-catch
-    npts_max = 1e5;
 end
 
 % 必须先判 isempty：没有 burst_s 的调用（CW 调试 / 单次看波形）里它是 []，
 % 而 isfinite([]) 返回的是空数组不是 false，`[] && ...` 会直接抛
 % 「短路 AND 的操作数必须可转换为逻辑标量」——整条调试路径一进来就崩。
-% || 是短路的，所以前面那条兜底 (`nargin < 7 || isempty(burst_s) || …`) 没这个问题，
-% 这里用的是 &&，顺序反了就炸。
 if ~isempty(burst_s) && isfinite(burst_s) && burst_s > 0
-    geom = plan_by_probe(dev, burst_s, f0_hz, targetFs, npts, npts_max);
-    if ~geom.ok
-        error('rigol:dho814:geometry', '%s', geom.reason);
-    end
+    geom = fixed_burst_geom(burst_s, f0_hz, targetFs);
 end
 
 if isempty(geom)
@@ -151,17 +136,10 @@ if isempty(geom)
     info.acq_n = NaN;
     info.fs_planned = NaN;
 else
-    % acq_n 用**回读的** SRATe 算：探测时读到的 fs 与真正生效的值若有偏差（换档竞态、
-    % 固件重算），按探测值裁出来的帧就会把猝发之外的空档包进去，而频谱是
-    % 「按 acq_n 个点、以 realFs 为采样率」解释的，差多少就错多少。
+    % 只在回读和固定档一致时才改用回读。差一截多半是上一轮的采样率还没刷掉，
+    % 拿它去算点数会把 6.660 ms 裁短。
     fs_use = geom.fs;
-    if isfinite(realFs) && realFs > 0
-        if abs(realFs - geom.fs) / max(geom.fs, 1) > 0.02
-            warning('rigol:dho814:fsdrift', ...
-                ['生效采样率 %.4g MSa/s 与探测值 %.4g MSa/s 不一致，按生效值重算分析点数。' ...
-                 '若反复出现，说明这台固件的档位在换设置后会变，请把整轮日志留下来。'], ...
-                realFs / 1e6, geom.fs / 1e6);
-        end
+    if isfinite(realFs) && realFs > 0 && abs(realFs - geom.fs) / geom.fs <= 0.02
         fs_use = realFs;
     end
     info.geom_ok = true;
@@ -180,61 +158,25 @@ else
 end
 end
 
-function G = plan_by_probe(dev, burst_s, f0_hz, fs_target, npts, npts_max)
-%PLAN_BY_PROBE 逐档探测 + 规划，找到可行档就停。
-%
-% 为什么要逐档而不是一次全测：探测每个「深度档 × 时基」组合都要 RUN→STOP 一次，
-% 全测约 8 秒，而实验开始只该付一次这个代价。常见情况（小 n_cycle）第一档就能命中。
-%
-% 必需条件（理论下界，用来决定从哪一档开始探）：
-%   可用触后窗口 = 深度/2 ≥ 猝发 × 余量  且  fs ≥ 10.06×f0
-%   → 深度 ≥ 2 × 猝发 × 余量 × fs_min
-DEPTH_TAG = {'1k', '10k', '100k', '1M', '5M', '10M'};
-DEPTH_PTS = [1e3, 1e4, 1e5, 1e6, 5e6, 1e7];
-margin = 1.15;
-fs_min = 2 * 3.87 * f0_hz * 1.3;
-need_pts = 2 * burst_s * margin * fs_min;
-
-% 从理论下界那一档开始，只探预算内的档；25M 开两路会报远程指令错误，已排除
-start = find(DEPTH_PTS >= max(need_pts, min(npts, npts_max)), 1, 'first');
-if isempty(start)
-    start = numel(DEPTH_PTS);
-end
-start = max(1, start);
-
-divs = [20e-6, 50e-6, 100e-6, 200e-6, 500e-6, 1e-3, 2e-3, 5e-3];
-T = struct('depth_tag', {}, 'depth_pts', {}, 'div_s', {}, 'fs', {}, 'record_s', {}, 'post_s', {});
-G = struct('ok', false, 'reason', '', 'note', '');
-for i = start:numel(DEPTH_TAG)
-    if DEPTH_PTS(i) > npts_max
-        break
-    end
-    try
-        Ti = rigol_dho814_probe_timing(dev, DEPTH_TAG(i), divs);
-    catch
-        continue
-    end
-    if isempty(Ti)
-        continue
-    end
-    T = [T, Ti]; %#ok<AGROW>
-    G = rigol_dho814_capture_geometry(burst_s, f0_hz, fs_target, npts, npts_max, T, margin);
-    if G.ok
-        return
-    end
-end
-% 全部探完仍不合格：用累计到的实测表给出可执行的失败说明
-if isempty(T)
-    G = struct('ok', false, 'reason', ...
-        ['探测没有拿到任何有效档位。检查示波器是否在 STOP 状态、两路是否都打开、' ...
-         ':ACQuire:SRATe? 是否有回读。'], 'note', '');
-else
-    G = rigol_dho814_capture_geometry(burst_s, f0_hz, fs_target, npts, npts_max, T, margin);
-    if ~G.ok
-        G.reason = sprintf(['按实测档位表，预算 %.4g 点内在 %s–%s 深度上都装不下这一发。%s'], ...
-            npts_max, T(1).depth_tag, T(end).depth_tag, G.reason);
-    end
-end
+function G = fixed_burst_geom(burst_s, f0_hz, fs_target)
+%FIXED_BURST_GEOM 实验用的固定示波器档，不探测。
+% 2026-10-28 在这台 DHO814（固件 00.01.05）上量过，以后都用这一套：
+%   深度 1M、2 ms/div、31.25 MSa/s、100 万点、记录 32 ms、触发后 16 ms。
+% 9990 周期 @ 1.5 MHz = 6.660 ms，从触发点裁，触发后的 16 ms 装得下。
+G = struct();
+G.ok = true;
+G.burst_s = burst_s;
+G.depth_tag = '1M';
+G.depth_pts = 1e6;
+G.div_s = 2e-3;
+G.scale_s_per_div = 2e-3;
+G.fs = 31.25e6;
+G.record_s = 1e6 / 31.25e6;
+G.post_s = 0.016;
+G.fs_target = fs_target;
+G.fs_min = 2 * 3.87 * f0_hz;
+G.transfer_bytes = 1e6 * 2 * 2;
+G.note = '固定档 1M / 2 ms/div / 31.25 MSa/s，不探测。';
 end
 
 function v = qnum(dev, cmd)

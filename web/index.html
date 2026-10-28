@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="vendor/uPlot.min.css">
 <link rel="stylesheet" href="app.css?v=wiring1">
 <script src="vendor/uplot.iife.min.js"></script>
-<script src="app.js?v=iclim2"></script>
+<script src="app.js?v=win66"></script>
 <script defer src="vendor/alpine.min.js"></script>
 </head>
 <!-- 参数名与 MATLAB 侧存档字段一致（pcd_gui_params），两边共用一套词汇，
@@ -66,18 +66,10 @@
         </select>
         <span class="unit">示波器</span>
       </div>
-      <!-- 接线说明由 MATLAB 侧 pcd_wiring 按当前通道号生成。接错任何一根都不会报错，
-           只会让数据「看着正常但其实不对」，所以常驻显示而不是藏进提示框。 -->
-      <div class="wiring" x-show="wiring.length">
-        <div class="wiring-title">接线 · 本实验室仪器（DG2052 + DHO814）</div>
-        <template x-for="(w, i) in wiring" :key="i">
-          <div class="wiring-line" x-text="w"></div>
-        </template>
-      </div>
     </section>
 
     <section class="card">
-      <h2>超声参数 <span class="en">(2 / 3 用治疗电压；4 用假超声 / IC 上限 / 电压上限)</span></h2>
+      <h2>超声参数 <span class="en">(开环用治疗电压；闭环先 0 V 本底，再开下面的检测电压)</span></h2>
       <div class="row">
         <label>频率</label>
         <input type="number" step="0.01" x-model.number="p.freq_mhz" @input="onDutyDrivers(false)" @change="onDutyDrivers(true)" :disabled="busy">
@@ -146,19 +138,15 @@
     <div class="right-tabs" role="tablist" x-cloak>
       <button type="button" role="tab" :class="{on: tab==='debug', run: runTab==='debug'}"
               :aria-selected="tab==='debug'" @click="setTab('debug')">
-        调试 <span class="en">Debug</span>
-      </button>
-      <button type="button" role="tab" :class="{on: tab==='nomb', run: runTab==='nomb'}"
-              :aria-selected="tab==='nomb'" @click="setTab('nomb')">
-        2 无微泡
+        连续测试
       </button>
       <button type="button" role="tab" :class="{on: tab==='open', run: runTab==='open'}"
               :aria-selected="tab==='open'" @click="setTab('open')">
-        3 开环
+        开环
       </button>
       <button type="button" role="tab" :class="{on: tab==='fb', run: runTab==='fb'}"
               :aria-selected="tab==='fb'" @click="setTab('fb')">
-        4 闭环
+        闭环
       </button>
     </div>
 
@@ -166,7 +154,7 @@
       <!-- 用 class 显隐，不用 x-show：x-show 写 inline display，会把 .step-bar 的 display:flex 冲掉，
            busy/tab 一刷新按钮整行消失。 -->
       <div class="step-bar is-on" :class="{'is-on': tab==='debug'}">
-        <div class="step-hint">1. 调试</div>
+        <div class="step-hint" x-text="p.dbg_drive==='burst' ? pulseHint() : '连续测试。输出选脉冲后，按左边的周期数和 PRF 发。'"></div>
         <div class="step-fields">
           <div class="field">
             <label>频率</label>
@@ -178,6 +166,13 @@
             <input type="number" step="1" x-model.number="p.dbg_volt" @input="pushParams(false)" @change="pushParams(true)">
             <span class="unit">mVpp</span>
           </div>
+          <div class="field">
+            <label>输出</label>
+            <select x-model="p.dbg_drive" @change="pushParams(true)" :disabled="busy">
+              <option value="cw">连续波</option>
+              <option value="burst">脉冲</option>
+            </select>
+          </div>
         </div>
         <div class="btns step-btns">
           <button type="button" @click="action('oneshot')" :disabled="busy">单次 One-shot</button>
@@ -186,39 +181,32 @@
                   :class="{'run-stop': busy && runTab==='debug'}"
                   :disabled="busy && runTab!=='debug'"
                   @click="action(busy && runTab==='debug' ? 'stop' : 'debug')"
-                  x-text="busy && runTab==='debug' ? '停止调试 STOP' : '连续调试 Debug'">连续调试 Debug</button>
-        </div>
-      </div>
-
-      <div class="step-bar" :class="{'is-on': tab==='nomb'}">
-        <div class="step-hint">2. 无微泡</div>
-        <div class="btns step-btns">
-          <button type="button" @click="action('noMB')" :disabled="busy">2. 开始无微泡</button>
+                  x-text="busy && runTab==='debug' ? '停止测试' : '开始连续测试'">开始连续测试</button>
         </div>
       </div>
 
       <div class="step-bar" :class="{'is-on': tab==='open'}">
-        <div class="step-hint">3. 有微泡开环</div>
+        <div class="step-hint">开环</div>
         <div class="btns step-btns">
-          <button type="button" @click="action('openMB')" :disabled="busy">3. 有微泡开环</button>
+          <button type="button" @click="action('openMB')" :disabled="busy">开始开环</button>
         </div>
       </div>
 
       <div class="step-bar" :class="{'is-on': tab==='fb'}">
-        <div class="step-hint">4. 闭环</div>
+        <div class="step-hint">闭环</div>
         <div class="step-fields">
           <div class="field">
-            <label>假超声</label>
+            <label title="0.2 MPa 对应的发生器电压。过门限后这一档保持不动，再采 10 帧，中位数才是基线">检测电压</label>
             <input type="number" step="1" min="1" x-model.number="p.base_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
             <span class="unit">mVpp</span>
           </div>
           <div class="field">
-            <label>目标</label>
+            <label title="相对过门限后再采的 10 帧中位数。刚过线的那一帧不算进去">目标</label>
             <input type="number" step="0.1" x-model.number="p.target_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
             <span class="unit">dB</span>
           </div>
           <div class="field">
-            <label title="1.5 MHz 时看 3.30±0.02 MHz。比假超声高过这个数，本发降 80 mV">IC 上限</label>
+            <label title="老师脚本里 IC 要累计 1000 次才改目标，等于没开。这里只显示，不因 IC 改电压">IC</label>
             <input type="number" step="0.1" x-model.number="p.ic_limit_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
             <span class="unit">dB</span>
           </div>
@@ -235,9 +223,9 @@
             <span class="unit">mVpp</span>
           </div>
         </div>
-        <div class="step-warn" x-show="awgMode==='manual'" x-cloak>手动信号源不做闭环。电压在发生器上调，采集用「3 开环」。</div>
+        <div class="step-warn" x-show="awgMode==='manual'" x-cloak>手动信号源不做闭环。电压在发生器上调，采集用「开环」。</div>
         <div class="btns step-btns">
-          <button type="button" @click="action('feedback')" :disabled="busy || !paramsReady || awgMode==='manual'">4. 开始闭环</button>
+          <button type="button" @click="action('feedback')" :disabled="busy || !paramsReady || awgMode==='manual'">开始闭环</button>
         </div>
       </div>
 
@@ -264,7 +252,7 @@
           <div class="chart-box" id="ch-volt"></div>
         </div>
         <div class="chart-cell cell-trend cell-sc">
-          <div class="chart-title">稳态空化 <span class="en">SC · 10log 相对假超声</span></div>
+          <div class="chart-title">稳态空化 <span class="en">SC · 10log 相对 10 帧中位数</span></div>
           <div class="chart-box" id="ch-sc"></div>
         </div>
         <div class="chart-cell cell-trend cell-ic">

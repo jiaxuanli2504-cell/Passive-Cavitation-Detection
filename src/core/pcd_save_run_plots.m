@@ -230,36 +230,134 @@ end
 function plot_time(fig, tx, pcd, fs, f0, k, ch1_col, ch2_col, txLab, pcdLab)
 if nargin < 9 || isempty(txLab), txLab = 'CH1'; end
 if nargin < 10 || isempty(pcdLab), pcdLab = 'CH2'; end
-nsub = double(~isempty(tx)) + double(~isempty(pcd));
-if nsub < 1
+ytx = [];
+ypcd = [];
+if ~isempty(tx)
+    ytx = tx(min(k, size(tx, 1)), :);
+end
+if ~isempty(pcd)
+    ypcd = pcd(min(k, size(pcd, 1)), :);
+end
+nref = max(numel(ytx), numel(ypcd));
+if nref < 2
     return;
 end
+% 6.66 ms 里有近万个周期。每个小段都画最大和最小，连起来就是一堵色块，正弦看不清。
+% 长记录改成两张：开头十个周期看波形，整段每 0.2 ms 一个峰峰值看有没有铺满。
+if isfinite(fs) && fs > 0 && nref / fs > 0.5e-3
+    plot_time_long(fig, ytx, ypcd, fs, f0, k, ch1_col, ch2_col, txLab, pcdLab);
+    return;
+end
+nsub = double(~isempty(ytx)) + double(~isempty(ypcd));
 ii = 0;
-if ~isempty(tx)
+if ~isempty(ytx)
     ii = ii + 1;
-    y = tx(min(k, size(tx, 1)), :);
-    [tt, yw] = snippet(y, fs, f0, 'sine');
+    [tt, yw] = time_draw(ytx, fs, f0);
     ax = subplot(nsub, 1, ii, 'Parent', fig);
     plot(ax, tt, yw * 1e3, 'Color', ch1_col, 'LineWidth', 0.8);
     grid(ax, 'on');
     ylabel(ax, [txLab ' (mV)']);
-    pp = (max(y) - min(y)) * 1e3;
+    pp = (max(ytx) - min(ytx)) * 1e3;
     title(ax, sprintf('%s 回读  pulse %d  p-p=%.2f mV', txLab, k, pp));
-    if isempty(pcd)
+    if isempty(ypcd)
         xlabel(ax, 'Time (\mus)');
     end
 end
-if ~isempty(pcd)
+if ~isempty(ypcd)
     ii = ii + 1;
-    y = pcd(min(k, size(pcd, 1)), :);
-    [tt, yw] = snippet(y, fs, f0, 'broad');
+    [tt, yw] = time_draw(ypcd, fs, f0);
     ax = subplot(nsub, 1, ii, 'Parent', fig);
     plot(ax, tt, yw * 1e3, 'Color', ch2_col, 'LineWidth', 0.6);
     grid(ax, 'on');
     ylabel(ax, [pcdLab ' (mV)']);
     xlabel(ax, 'Time (\mus)');
-    pp = (max(y) - min(y)) * 1e3;
+    pp = (max(ypcd) - min(ypcd)) * 1e3;
     title(ax, sprintf('%s PCD  pulse %d  p-p=%.2f mV', pcdLab, k, pp));
+end
+end
+
+function plot_time_long(fig, ytx, ypcd, fs, f0, k, ch1_col, ch2_col, txLab, pcdLab)
+set(fig, 'Position', [40 30 980 860]);
+nsub = double(~isempty(ytx)) * 2 + double(~isempty(ypcd));
+Tus = max(numel(ytx), numel(ypcd)) / fs * 1e6;
+ii = 0;
+if ~isempty(ytx)
+    ii = ii + 1;
+    [tt, yw] = head_cycles(ytx, fs, f0, 10);
+    ax = subplot(nsub, 1, ii, 'Parent', fig);
+    plot(ax, tt, yw * 1e3, 'Color', ch1_col, 'LineWidth', 1.0);
+    grid(ax, 'on');
+    xlabel(ax, 'Time (\mus)');
+    ylabel(ax, [txLab ' (mV)']);
+    title(ax, sprintf('%s 回读  pulse %d  开头 10 个周期  整段 p-p=%.2f mV', ...
+        txLab, k, (max(ytx) - min(ytx)) * 1e3));
+    ii = ii + 1;
+    [tt, pp] = pp_bins(ytx, fs, 0.2e-3);
+    ax = subplot(nsub, 1, ii, 'Parent', fig);
+    plot(ax, tt, pp * 1e3, '.-', 'Color', ch1_col, 'LineWidth', 1.1, 'MarkerSize', 9);
+    grid(ax, 'on');
+    xlim(ax, [0 Tus]);
+    ylim(ax, [0, pp_ylim(pp)]);
+    ylabel(ax, [txLab ' p-p (mV)']);
+    title(ax, sprintf('%s 回读整段  每 0.2 ms 一个峰峰值  0–%.0f \\mus', txLab, Tus));
+    if isempty(ypcd)
+        xlabel(ax, 'Time (\mus)');
+    end
+end
+if ~isempty(ypcd)
+    ii = ii + 1;
+    [tt, pp] = pp_bins(ypcd, fs, 0.2e-3);
+    ax = subplot(nsub, 1, ii, 'Parent', fig);
+    plot(ax, tt, pp * 1e3, '.-', 'Color', ch2_col, 'LineWidth', 1.1, 'MarkerSize', 9);
+    grid(ax, 'on');
+    xlim(ax, [0 Tus]);
+    ylim(ax, [0, pp_ylim(pp)]);
+    xlabel(ax, 'Time (\mus)');
+    ylabel(ax, [pcdLab ' p-p (mV)']);
+    title(ax, sprintf('%s PCD  pulse %d  每 0.2 ms 峰峰值  整段 p-p=%.2f mV', ...
+        pcdLab, k, (max(ypcd) - min(ypcd)) * 1e3));
+end
+end
+
+function [tt, yw] = head_cycles(y, fs, f0, ncy)
+%HEAD_CYCLES 从触发点起画 ncy 个驱动周期，不追峰，这样横轴 0 就是这一发的起点。
+y = double(y(:).');
+n = numel(y);
+if ~(isfinite(f0) && f0 > 0)
+    f0 = 1.5;
+end
+nwin = max(32, round(ncy / (f0 * 1e6) * fs));
+nwin = min(n, max(2, nwin));
+ti = 1:nwin;
+tt = (ti - 1) / fs * 1e6;
+yw = y(ti);
+end
+
+function ytop = pp_ylim(pp)
+% 纵轴从 0 起。自动缩放到 19.7–20.0 会把不到 0.3 mV 的起伏画成大锯齿。
+top = max(pp) * 1e3;
+if ~(isfinite(top) && top > 0)
+    top = 1;
+end
+ytop = top * 1.2;
+end
+
+function [tt, pp] = pp_bins(y, fs, dt)
+%PP_BINS 整段按 dt 分箱，每箱一个峰峰值。正弦不再画成色块，幅度有没有铺满窗口一眼能看出来。
+y = double(y(:).');
+n = numel(y);
+nb = max(1, ceil((n / fs) / dt));
+tt = zeros(1, nb);
+pp = zeros(1, nb);
+for b = 1:nb
+    i0 = floor((b - 1) * dt * fs) + 1;
+    i1 = min(n, floor(b * dt * fs));
+    if i1 < i0
+        i1 = min(n, i0);
+    end
+    seg = y(i0:i1);
+    tt(b) = ((i0 + i1) / 2 - 1) / fs * 1e6;
+    pp(b) = max(seg) - min(seg);
 end
 end
 
@@ -306,7 +404,7 @@ if ~isempty(volt)
     ylabel(ax, 'Voltage (mVpp)');
     xlim(ax, [xL xR]);
     if isfinite(tgt_db)
-        title(ax, sprintf('电压  n=%d  假超声 %d 帧  目标 %.1f \\pm 0.4 dB', ...
+        title(ax, sprintf('电压  n=%d  假超声 %d 帧  目标 %.1f \\pm 0.2 dB', ...
             np_axis, n_dummy, tgt_db));
     else
         title(ax, sprintf('电压  n=%d  假超声 %d 帧', np_axis, n_dummy));
@@ -317,12 +415,12 @@ if n_dummy >= 1 && use_db && (~isempty(sc_sum) || ~isempty(sc)) && ~isempty(ic)
     ax = subplot(n, 1, ii, 'Parent', fig);
     hold(ax, 'on');
     if ~isempty(sc_sum) && isfinite(sc0_sum) && sc0_sum > 0
-        % 蓝线 = 所选谐波窗求和。橙带 = 本 run 目标 ±0.4 dB。不画峰/底。
+        % 蓝线 = 所选谐波窗求和。橙带 = 本 run 目标 ±0.2 dB。不画峰/底。
         sc_db = 10 * log10(max(sc_sum(:), realmin) / sc0_sum);
         xs = xx(1:numel(sc_db));
         if isfinite(tgt_db)
             patch(ax, [xL xR xR xL], ...
-                [tgt_db-0.4 tgt_db-0.4 tgt_db+0.4 tgt_db+0.4], ...
+                [tgt_db-0.2 tgt_db-0.2 tgt_db+0.2 tgt_db+0.2], ...
                 [1.00 0.86 0.72], 'EdgeColor', 'none', 'HandleVisibility', 'off');
             yline(ax, tgt_db, '-', 'Color', [0.85 0.35 0.10], 'LineWidth', 1.1, 'HandleVisibility', 'off');
         end
@@ -357,12 +455,12 @@ if n_dummy >= 1 && use_db && (~isempty(sc_sum) || ~isempty(sc)) && ~isempty(ic)
         plot(ax, xx(1:numel(sc)), sc_db, 'b.-', 'LineWidth', 1.0, 'MarkerSize', 8);
         if isfinite(tgt_db)
             yline(ax, tgt_db, '-', 'Color', [0.85 0.25 0.10], 'LineWidth', 1.2, 'HandleVisibility', 'off');
-            yline(ax, tgt_db + 0.4, '--', 'Color', [0.85 0.25 0.10], 'LineWidth', 0.8, 'HandleVisibility', 'off');
-            yline(ax, tgt_db - 0.4, '--', 'Color', [0.85 0.25 0.10], 'LineWidth', 0.8, 'HandleVisibility', 'off');
+            yline(ax, tgt_db + 0.2, '--', 'Color', [0.85 0.25 0.10], 'LineWidth', 0.8, 'HandleVisibility', 'off');
+            yline(ax, tgt_db - 0.2, '--', 'Color', [0.85 0.25 0.10], 'LineWidth', 0.8, 'HandleVisibility', 'off');
         end
         yline(ax, 0, ':', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
         ylabel(ax, 'SC (dB re dummy)');
-        legend(ax, {'SC  10 log_{10}(SC/SC_0)', sprintf('target %.1f \\pm 0.4 dB', tgt_db)}, ...
+        legend(ax, {'SC  10 log_{10}(SC/SC_0)', sprintf('target %.1f \\pm 0.2 dB', tgt_db)}, ...
             'Location', 'best');
         shade_dummy_x(ax, xx, n_dummy, tmode);
         grid(ax, 'on');
@@ -624,6 +722,36 @@ if ~any(keep)
 end
 fw = fw(keep);
 dbw = dbw(keep);
+end
+
+function [tt, yw] = time_draw(y, fs, f0)
+% 超过 0.5 ms 的记录就是这一发本身。两路都画整段，横轴才是同一个 0–6.66 ms。
+% 再截各自峰附近的十几个周期，两张图的横坐标会差好几毫秒，看起来像没对齐。
+y = double(y(:).');
+n = numel(y);
+if isfinite(fs) && fs > 0 && n / fs > 0.5e-3
+    [tt, yw] = envelope_window(y, fs);
+else
+    [tt, yw] = snippet(y, fs, f0, 'sine');
+end
+end
+
+function [tt, yw] = envelope_window(y, fs)
+n = numel(y);
+step = max(1, ceil(n / 800));
+nb = ceil(n / step);
+tt = zeros(1, nb * 2);
+yw = zeros(1, nb * 2);
+for k = 1:nb
+    i0 = (k - 1) * step + 1;
+    i1 = min(n, k * step);
+    seg = y(i0:i1);
+    tmid = ((i0 + i1) / 2 - 1) / fs * 1e6;
+    tt(2 * k - 1) = tmid;
+    tt(2 * k) = tmid;
+    yw(2 * k - 1) = max(seg);
+    yw(2 * k) = min(seg);
+end
 end
 
 function [tt, yw] = snippet(y, fs, f0, kind)

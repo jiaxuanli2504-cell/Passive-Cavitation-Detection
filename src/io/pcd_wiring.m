@@ -8,7 +8,7 @@ function [lines, note] = pcd_wiring(cfg)
 %   2) 副本通道必须由主通道后面板 TrigOut 做外部触发，否则两路猝发各起各的
 %      （面板 Align 没有 SCPI 命令，参数相同也不保证对齐）；
 %   3) DHO814 后面板没有 EXT TRIG 插座，那条 TTL 只能进 CH1–CH4 里的某一路；
-%   4) TrigOut 要一分二（BNC 三通）：一路喂示波器触发，一路喂副本通道的外触发。
+%   4) 主通道后面板 TrigOut 进副本通道后面板，再从副本后面板分一路到示波器触发。
 %
 % 全部从 rigol_instr_config 的通道号生成，用户改了通道号，提示会跟着改。
 if nargin < 1 || isempty(cfg)
@@ -33,18 +33,18 @@ indep_trig = trig >= 1 && trig ~= tx;
 clash = indep_trig && trig == pcd;   % 真正接错的只有「触发通道 = PCD 通道」
 
 L = {};
-L{end + 1} = sprintf('① 发生器前面板 CH%d → 功放 → 换能器（主输出，不经三通）', awg);
+L{end + 1} = sprintf('① 发生器前面板 CH%d → 功放 → 换能器', awg);
 if mon > 0
-    L{end + 1} = sprintf('② 发生器前面板 CH%d → 示波器 CH%d　（回读副本，独立通道，与功放互不分压）', mon, tx);
+    L{end + 1} = sprintf('② 发生器前面板 CH%d → 示波器 CH%d（回读）', mon, tx);
 else
     L{end + 1} = sprintf('② 示波器 CH%d ← 回读（未启用镜像通道，只能从功放前分路取得）', tx);
 end
-L{end + 1} = sprintf('③ 示波器 CH%d ← PCD 换能器', pcd);
-if indep_trig
-    L{end + 1} = sprintf('④ 发生器后面板 CH%d TrigOut ── 三通 ──→ 示波器 CH%d　（硬件触发源）', awg, trig);
-    if mon > 0
-        L{end + 1} = sprintf('⑤ 　　　　　　　　　　└─ 三通另一支 → 发生器后面板 CH%d　（外部触发输入）', mon);
-    end
+L{end + 1} = sprintf('③ 示波器 CH%d ← PCD', pcd);
+if mon > 0 && indep_trig
+    L{end + 1} = sprintf('④ 发生器后面板 CH%d → 发生器后面板 CH%d（外触发，两路一起出脉冲）', awg, mon);
+    L{end + 1} = sprintf('⑤ 发生器后面板 CH%d 再分一路 → 示波器 CH%d（触发）', mon, trig);
+elseif indep_trig
+    L{end + 1} = sprintf('④ 发生器后面板 CH%d TrigOut → 示波器 CH%d（触发）', awg, trig);
 else
     L{end + 1} = sprintf(['④ 未设独立触发通道：改为示波器 CH%d 的模拟边沿触发，' ...
         '窗起点只能靠扫回读包络（约 12 µs 偏置，且回读弱于 ~20 mVpp 会失锁）'], tx);

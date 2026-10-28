@@ -2,8 +2,10 @@ function result = pcd_run_experiment(mode, ui)
 %PCD_RUN_EXPERIMENT
 %  'before'  阶段2：无微泡，猝发，CH1+CH2
 %  'open_mb' 阶段3：有微泡开环（输液泵已在跑，不等待注射）
-%  'feedback'/'during' 阶段4：基线 + 闭环（同样假定泵已在输液）
-%  文献映射（Chien BME Front 2022）：2=PCDcontrol/NoMB；假超声dummy在4基线（有微泡、~18 mVpp/0.2 MPa），不是2；本文无开环治疗组，3为实验室对照。
+%  'feedback'/'during'  0 V 采 10 帧本底，门限 = 均值 + 3×标准差。
+%  再开到检测电压，一帧超过门限只说明微泡到了，这一帧不当基线。
+%  电压保持不动，再采 10 帧，中位数才是基线，然后关输出。
+%  治疗电压重新打开后每帧 +步长，目标相对这 10 帧中位数。
 %  阶段4默认控 2f±20 kHz 窗求和（Fig.6 蓝线，3 MHz 不是 4.5）；峰/底在界面可选。
 % ui 为 UI 适配层（实现见 pcd_ui_html，约定接口见 pcd_ui_check）；本函数与界面无关。
 global pcd_abort fgen
@@ -20,7 +22,7 @@ mode = lower(char(mode));
 L = pcd_scope_labels();
 if L.manual && any(strcmp(mode, {'during', 'feedback'}))
     error('pcd:awg:manual', ...
-        '手动信号源不做闭环。请在发生器上自己调电压，用「3 开环」只采集。');
+        '手动信号源不做闭环。请在发生器上自己调电压，用「开环」只采集。');
 end
 scope = pcd_visa('scope');
 if L.manual
@@ -36,12 +38,18 @@ if any(strcmp(mode, {'during', 'feedback'}))
     % 假超声常低于治疗电压。触发必须按「马上要打的那档」算，否则 CH1 到不了
     % 触发电平，:SINGle 一直等，界面就停在假超声 0/25。
     base_v = min(p.max_mVpp, max(1, p.base_mVpp));
-    v_first = base_v;
+    v_first = 0;
 else
     v_out = p.volt_mVpp;
     base_v = v_out;
     v_first = v_out;
 end
+% 先打开发生器，再写示波器。示波器用固定的 1M、2 ms/div，不再逐档试时基。
+ui.status(sprintf('正在打开发生器  %.4g mVpp', v_first));
+t_us = start_burst(fgen, p, v_first);
+% 设置示波器若中途出错，也要把刚刚打开的输出关掉。
+rfGuard = onCleanup(@() pcd_visa('rf_off_if', token)); %#ok<NASGU>
+ui.status('发生器已打开。正在设置示波器。');
 % 触发电平必须低于实际回读峰值（约 Vpp/2）。
 % 触发改接到发生器后面板（另一路）时，电平是 TTL，不用这套毫伏。
 vpp_v = max(v_first, 1) / 1000;
@@ -146,6 +154,18 @@ n_dummy = 0;     % 假超声入库帧数（开环 2/3 为 0）
 t_us = [];       % 第一声超声（发生器 OUTPUT ON）起的墙钟；PRF 空档也算进 duration_s
 us_total = p.duration_s;
 phase_limit_s = inf;   % 假超声单独限时；治疗段改回 inf，只受 duration_s 约束
+ignore_duration = false;
+fb_origin = [];
+clock_mode = '';
+arrive_level = NaN;
+n_arrive_hit = 0;
+sc1 = NaN;
+sc2 = NaN;
+n_sc1 = 0;
+n_sc2 = 0;
+n_base = 0;
+n_hit = 0;
+sc_sd = NaN;
 sc0 = NaN;
 sc0_pk = NaN;
 ic0 = NaN;
@@ -156,64 +176,103 @@ sc_lo = NaN;
 try
     if any(strcmp(mode, {'during', 'feedback'}))
         prefix = ['Sonication_' sanitize_id(p.studyID)];
-        ui.status(sprintf('4 闭环  目标 %.1f dB  IC 上限 %.1f dB', p.target_db, p.ic_limit_db));
-        fprintf('4 闭环  target_db=%.4g  IC上限 %.4g dB  ctrl=%s\n', p.target_db, p.ic_limit_db, metric);
-        % 文献 BaselineDuration = 5 s、PRF 2 Hz，5 秒里大约 10 发都进基线。
-        % 这台示波器 USB 大约 1 秒一帧，第一帧还只定量程、不入库。
-        % 15 秒大约能留下 10 帧做中位数，接近他们的 10 发，又不会占掉小鼠那两三分钟。
-        % 假超声电压界面可调（base_mVpp）。文献 18 mVpp 是他们探头的 0.2 MPa。
-        dummy_s = 15;
-        t_us = start_burst(fgen, p, base_v);
-        cd_push();
-        phase_limit_s = dummy_s;
-        run_loop(inf, base_v, false, sprintf('4 假超声基线 %.4g mVpp', base_v));
+        ui.status(sprintf('闭环  本底 0 V，10 帧  检测 %.4g mVpp  治疗从 %.4g mVpp 起', ...
+            base_v, v_out));
+        fprintf('闭环  本底 0 V×10 帧  检测电压 %.4g mVpp  治疗 %.4g mVpp  目标 %.4g dB\n', ...
+            base_v, v_out, p.target_db);
+        % 0 V 本底 10 帧，门限 = 均值+3×标准差。过门限只用来判断微泡到了。
+        % 刚过线的那一帧还在爬，不当基线。检测电压保持不动，再采 10 帧取中位数。
+        bg_n = 10;
+        t_us = tic;
+        ignore_duration = true;
+        clock_mode = 'bg';
         phase_limit_s = inf;
+        cd_push();
+        run_loop(bg_n, 0, false, '本底 0 V，不要开泵');
         if pcd_abort
             cd_off();
             result = save_now();
             return;
         end
-        n_dummy = numel(PKrec);
-        if n_dummy < 1
-            error('pcd:baseline', '基线没有采到有效 CH2 帧。未开始闭环。');
+        n_sc1 = n_good;
+        [sc1, sc_sd] = seg_mean_std(1, n_sc1);
+        if ~(n_sc1 >= 2 && isfinite(sc1) && sc1 > 0 && isfinite(sc_sd))
+            error('pcd:baseline', '0 V 本底没有采到。未开检测电压。');
         end
-        i0 = 1;
-        % 假超声中位数作 SC0。控哪个量，sc_tgt 就用哪个量 —— 与 Fig.6 蓝线对齐时必须是窗求和。
-        sc0_pk = median(PKrec(i0:n_dummy), 'omitnan');
-        sc0_sum_med = median(SCrec(i0:n_dummy), 'omitnan');
-        ic0 = mean(ICrec(i0:n_dummy), 'omitnan');
-        if use_sum
-            sc0 = sc0_sum_med;
-            if ~(isfinite(sc0) && sc0 > 0)
-                error('pcd:baseline', '基线 2f 窗求和无效。未开始闭环。');
-            end
-            fprintf('假超声  SC0=%.4g  目标 %.1f dB → %.4g\n', ...
-                sc0, p.target_db, sc0 * (10^(p.target_db / 10)));
-        else
-            sc0 = sc0_pk;
-            if ~(isfinite(sc0) && sc0 > 0)
-                error('pcd:baseline', '基线 2f 峰无效。未开始闭环。');
-            end
-            fprintf('假超声  SC0=%.4g  目标 %.1f dB → %.4g\n', ...
-                sc0, p.target_db, sc0 * (10^(p.target_db / 10)));
+        arrive_level = sc1 + 3 * sc_sd;
+        fprintf('本底均值 %.4g  标准差 %.4g  门限 均值+3σ = %.4g\n', sc1, sc_sd, arrive_level);
+        n_arrive_hit = 0;
+        clock_mode = 'detect';
+        det_n = max(1, round(p.mb_load_s));
+        if ~(isfinite(p.mb_load_s) && p.mb_load_s > 0)
+            det_n = inf;
         end
-        sc_tgt = sc0 * (10^(p.target_db / 10));
-        sc_hi = sc0 * (10^((p.target_db + 0.4) / 10));
-        sc_lo = sc0 * (10^((p.target_db - 0.4) / 10));
-        % 假超声结束后从基线电压往上涨，不要跳到治疗电压再 +1 mVpp/帧。
-        % USB 大约 1 秒一帧，+1 的话 500→1500 要十几分钟。步进界面可调。
-        % 闭环不再按 n_expect 停：USB ~1 帧/s，PRF 5 Hz 时发生器打的发数远多于采到的帧。
-        % 停表只看墙钟（含假超声已消耗的时间、PRF 空档）。
-        run_loop(inf, base_v, true, ...
-            '4 闭环 Feedback', sc_tgt, sc_hi, sc_lo, p.max_mVpp);
+        rigol_dg2052_set_vpp_mV(fgen, base_v);
+        run_loop(det_n, base_v, false, sprintf('检测 %.4g mVpp，请开泵。一帧过门限即停', base_v));
+        if pcd_abort
+            cd_off();
+            result = save_now();
+            return;
+        end
+        if n_good <= n_sc1
+            error('pcd:baseline', '检测阶段没有采到帧。未开始闭环。');
+        end
+        if n_arrive_hit < 1
+            rigol_dg2052_output_set(fgen, false);
+            error('pcd:baseline', '检测打满仍未过门限。未把没过线的帧当成基线。');
+        end
+        n_hit = n_good;
+        clock_mode = 'base';
+        arrive_level = NaN;
+        base_n = 10;
+        run_loop(base_n, base_v, false, sprintf('微泡已到。%.4g mVpp 不动，再采 10 帧', base_v));
+        if pcd_abort
+            cd_off();
+            result = save_now();
+            return;
+        end
+        n_sc2 = n_good;
+        n_base = n_sc2;
+        sc2 = seg_median(n_hit + 1, n_sc2);
+        ic0 = NaN;
+        if n_sc2 > n_hit && numel(ICrec) >= n_sc2
+            ic_seg = ICrec(n_hit + 1:n_sc2);
+            ic_seg = ic_seg(isfinite(ic_seg) & ic_seg > 0);
+            if ~isempty(ic_seg)
+                ic0 = median(ic_seg);
+            end
+        end
+        if ~(n_sc2 > n_hit && isfinite(sc2) && sc2 > 0)
+            error('pcd:baseline', '有微泡的 10 帧基线没有采到。未开始闭环。');
+        end
+        fprintf('基线=第 %d–%d 帧中位数 %.4g（过线的第 %d 帧未计入）  目标 %.1f dB → %.4g\n', ...
+            n_hit + 1, n_sc2, sc2, n_hit, p.target_db, sc2 * 10^(p.target_db / 10));
+        rigol_dg2052_output_set(fgen, false);
+        sc0 = sc2;
+        n_dummy = n_base;
+        sc_tgt = sc2 * 10^(p.target_db / 10);
+        sc_hi = sc2 * 10^((p.target_db + 0.2) / 10);
+        sc_lo = sc2 * 10^((p.target_db - 0.2) / 10);
+        arrive_level = NaN;
+        ignore_duration = false;
+        fb_origin = toc(t_us);
+        clock_mode = 'fb';
+        us_total = p.duration_s;
+        phase_limit_s = inf;
+        ui.clearTrend();
+        rigol_dg2052_set_vpp_mV(fgen, v_out);
+        rigol_dg2052_output_set(fgen, true);
+        cd_push();
+        run_loop(inf, v_out, true, ...
+            sprintf('闭环  相对 10 帧中位数 %.1f dB', p.target_db), sc_tgt, sc_hi, sc_lo, p.max_mVpp);
     elseif strcmp(mode, 'open_mb')
         prefix = ['OpenMB_' sanitize_id(p.studyID)];
-        t_us = start_burst(fgen, p, v_out);
+        t_us = tic;
         cd_push();
-        run_loop(inf, v_out, false, '3 有微泡开环');
+        run_loop(inf, v_out, false, '开环');
     else
         prefix = ['NoMB_' sanitize_id(p.studyID)];
-        t_us = start_burst(fgen, p, v_out);
+        t_us = tic;
         cd_push();
         run_loop(inf, v_out, false, '2 无微泡 CH2');
     end
@@ -291,7 +350,14 @@ result = save_now();
         S.n_good = n_good;
         S.studyID = p.studyID;
         S.mb_injection = 'continuous_infusion';
-        S.note = 'burst; CH1 TX + CH2 PCD RAW; CH1 edge; MB pump assumed already on';
+        S.note = '0 V x10; mean+3std arrival; then 10-frame median at detect voltage; ramp from treatment V';
+        S.sc1 = sc1;
+        S.sc2 = sc2;
+        S.n_sc1 = n_sc1;
+        S.n_sc2 = n_sc2;
+        S.sc_bg_std = sc_sd;
+        S.n_base = n_base;
+        S.n_hit = n_hit;
         % 采集质量元数据：以后复查数据时，这些值决定「这一帧能不能用」
         S.n_clip_retry = n_clip;         % 削顶丢弃次数（这些点未进 V/SC/闭环/图）
         S.n_prime_discard = n_prime;     % 只为标定量程而丢弃的帧数
@@ -311,10 +377,16 @@ result = save_now();
         % 分析图在 pcd_save_acquisition 结束时画一次，不在每发脉冲。
         S.params = pcd_save_params(kind_of(mode), param_src());
         S.n_dummy = n_dummy;
-        S.sc0 = sc0;                 % 闭环所用度量的假超声基线
+        S.sc0 = sc0;                 % 闭环参考：过门限后 10 帧的中位数
+        S.sc1 = sc1;                 % 无微泡基线，只用来判断微泡到达
+        S.sc2 = sc2;
+        S.n_sc1 = n_sc1;
+        S.n_sc2 = n_sc2;
         S.sc0_peak = sc0_pk;
         S.sc0_sum = NaN;
-        if n_dummy >= 1 && numel(SCrec) >= 1
+        if n_sc2 > n_hit && numel(SCrec) >= n_sc2
+            S.sc0_sum = median(SCrec(n_hit + 1:n_sc2), 'omitnan');
+        elseif n_dummy >= 1 && numel(SCrec) >= 1
             S.sc0_sum = median(SCrec(1:min(n_dummy, numel(SCrec))), 'omitnan');
         end
         S.ic0 = ic0;
@@ -370,9 +442,6 @@ result = save_now();
         if nargin < 7, sc_lo = NaN; end
         if nargin < 8, max_mVpp = p.max_mVpp; end
         ramping = true;
-        n_high = 0;        % 维持：滤波后连续偏高帧数（单发尖峰不计入）
-        n_low = 0;         % 维持：滤波后连续偏低帧数
-        n_tgt_hit = 0;     % 爬升：连续原值摸到黄带中心的帧数（单发噪声不切维持）
         n0 = n_good;
         prime = true;      % 第一发：只用来标定量程与校验采集窗（避免初值过宽浪费量化）
         clip_retry = 0;    % 连续削顶重采计数（上限 3，避免一直空转）
@@ -417,7 +486,12 @@ result = save_now();
             if ~pcd_visa('alive', token)
                 break;
             end
-            if ~frame_ok(chPcd, chTx, okTx, volt, anchored)
+            if volt <= 0
+                frame_good = numel(chPcd) >= 256;
+            else
+                frame_good = frame_ok(chPcd, chTx, okTx, volt, anchored);
+            end
+            if ~frame_good
                 n_miss = n_miss + 1;
                 show_live(chTx, chPcd, realFs, do_fb);
                 % 触发电平只按「连续」失败降档，且设下限。改之前 n_miss==1 就降一半，
@@ -508,9 +582,7 @@ result = save_now();
             k = n_good;
             datamat(k, :) = rowP; %#ok<AGROW>
             txmat(k, :) = rowT; %#ok<AGROW>
-            % 闭环也每发刷新时域+FFT。以前每 5 发且 CH1 不算谱，界面会冻在假超声最后一屏。
-            ui.waveform(txmat(k, :), info.realFs, p.freq_mhz, '回读', struct('ch', 'tx', 'fft', true));
-            ui.waveform(datamat(k, :), info.realFs, p.freq_mhz, 'PCD', struct('ch', 'pcd', 'fft', true));
+            % 时域图放到改电压之后再推。画图要做 FFT，放在调压前面会把下一发的武装往后推。
             [F, Y, db] = pcd_spectrum(datamat(k, :), info.realFs);
             [sc, ic, ~, ~, M] = pcd_band_energy(Y, F, p.freq_mhz * 1e6, cfg.harmonic_bandwidth_hz, p.sc_harm);
             pk = M.sc_ctrl;
@@ -571,26 +643,30 @@ result = save_now();
             else
                 cav = q2.note;
             end
-            ic_hot = false;
             ic_db = NaN;
-            % 本发相对假超声。事件阈值默认 1 dB：
-            % Sun et al., BME Frontiers, 2022；Chien et al., Sci. Rep., 2022。
             if do_fb && isfinite(ic0) && ic0 > 0 && isfinite(p.ic_limit_db) && ...
                     k >= 1 && isfinite(ICrec(k)) && ICrec(k) > 0
                 ic_db = 10 * log10(ICrec(k) / ic0);
-                ic_hot = ic_db > p.ic_limit_db;
             end
             left = remain_us();
             cd_push();
-            if isfinite(tgt)
+            if strcmp(clock_mode, 'detect')
+                live = sprintf('%s  #%d  检测  %s  %s %s  %.2f mVpp', ...
+                    label, k, txmsg, tags.pcdTag, cav, pp2);
+                nowv = ctrl_at(k);
+                if isfinite(sc_sd) && sc_sd > 0 && isfinite(nowv) && isfinite(sc1)
+                    live = sprintf('%s  高过本底 %.1f 个标准差（门限 3）', ...
+                        live, (nowv - sc1) / sc_sd);
+                end
+            elseif isfinite(tgt) && isfinite(left)
                 live = sprintf('%s  #%d/%d  剩余 %.0fs  %s  %s %s  %.2f mVpp', ...
                     label, k, tgt, left, txmsg, tags.pcdTag, cav, pp2);
             else
                 live = sprintf('%s  #%d  剩余 %.0fs  %s  %s %s  %.2f mVpp', ...
                     label, k, left, txmsg, tags.pcdTag, cav, pp2);
             end
-            if ic_hot
-                live = sprintf('%s  IC %.1f dB 超上限 %.1f，本发降压', live, ic_db, p.ic_limit_db);
+            if isfinite(ic_db)
+                live = sprintf('%s  IC %+.1f dB', live, ic_db);
             end
             ui.status(live);
             if ~do_fb
@@ -604,121 +680,37 @@ result = save_now();
                 save_now(false);
             end
             if do_fb
-                % 图仍画本发原值。爬升用近 5 发平均；维持用近 7 发中位数。
-                % 爬升：离目标 ≥1.8 dB 时 +80 mV/帧，接近黄带再收到 10 mV、3 mV。
-                % IC 超上限时本发只降不升。SC 对加电压不再抬头就结束爬升。
-                ctrl_f = ctrl;
-                i1 = max(n0 + 1, k - 4);
-                if use_sum
-                    hist = SCrec(i1:k);
-                else
-                    hist = PKrec(i1:k);
+                % 老师脚本：未到目标就每帧加一步（界面步长，原代码 5 mV）。
+                % 第一帧只加、不判断。到了就停，之后高出 +0.2 dB 减 1 mV，低过 −0.2 dB 加 1 mV。
+                step = p.vstep_mVpp;
+                if ~(isfinite(step) && step > 0)
+                    step = 5;
                 end
-                avg = mean(hist(:), 'omitnan');
-                if isfinite(avg) && avg > 0
-                    ctrl_f = avg;
-                end
-                err_db = NaN;
-                err_raw = NaN;
-                if isfinite(sc_tgt) && sc_tgt > 0 && isfinite(ctrl_f) && ctrl_f > 0
-                    err_db = 10 * log10(ctrl_f / sc_tgt);
-                end
-                if isfinite(sc_tgt) && sc_tgt > 0 && isfinite(ctrl) && ctrl > 0
-                    err_raw = 10 * log10(ctrl / sc_tgt);
-                end
-                if ic_hot
-                    % 这一发 IC 窄带比假超声高出上限：电压降 80 mV，SC 本发不动。
-                    % 下一发 IC 回到上限以下，SC 继续。上限默认 1 dB（Sun 2022 的 IC 事件）。
-                    n_high = 0;
-                    n_low = 0;
-                    volt = max(1, volt - 80);
-                elseif ramping
-                    % 快到目标：用本发与平均里更接近目标的那个算步距（平均滞后会让
-                    % 单发已到 2 dB 仍大步加）。本发一旦进入黄带就停大步。
-                    err_up = err_db;
-                    if isfinite(err_raw)
-                        if ~(isfinite(err_up))
-                            err_up = err_raw;
-                        else
-                            err_up = max(err_db, err_raw);  % 负得少 = 更接近目标
-                        end
-                    end
-                    raw_in = isfinite(sc_lo) && isfinite(ctrl) && ctrl >= sc_lo;
-                    mean_in = isfinite(sc_lo) && isfinite(ctrl_f) && ctrl_f >= sc_lo;
-                    flat = false;
-                    if k >= n0 + 8 && isfinite(sc0) && sc0 > 0
-                        if use_sum
-                            aSc = SCrec(k-7:k-4);
-                            bSc = SCrec(k-3:k);
-                        else
-                            aSc = PKrec(k-7:k-4);
-                            bSc = PKrec(k-3:k);
-                        end
-                        dA = median(10 * log10(max(aSc, realmin) / sc0), 'omitnan');
-                        dB = median(10 * log10(max(bSc, realmin) / sc0), 'omitnan');
-                        if isfinite(dA) && isfinite(dB) && (Vrec(k) - Vrec(k-7)) >= 60 && (dB - dA) < 0.3
-                            flat = true;
-                        end
-                    end
-                    if k > n0 + 1 && (raw_in || mean_in || flat)
+                if ramping
+                    if k > n0 + 1 && isfinite(ctrl) && isfinite(sc_tgt) && ctrl >= sc_tgt
                         ramping = false;
-                        n_high = 0;
-                        n_low = 0;
                     else
-                        volt = min(max_mVpp, volt + adapt_vstep_mV(err_up, true, true));
+                        volt = min(max_mVpp, volt + step);
                     end
-                end
-                if ~ramping && ~ic_hot
-                    % 维持：黄带（目标 ±0.4 dB）内不动。近 7 发中位数，连续 5 帧
-                    % 出带才 ±1 mV。单发从 1 dB 跳到 4 dB 不带动电压。
-                    % 近 8 发电压已升 ≥20 mV 而 SC 中位数没抬 0.3 dB，就停止往上加。
-                    j1 = max(n0 + 1, k - 6);
-                    if use_sum
-                        seg = SCrec(j1:k);
-                    else
-                        seg = PKrec(j1:k);
-                    end
-                    seg = seg(isfinite(seg) & seg > 0);
-                    err_hold = NaN;
-                    if numel(seg) >= 3 && isfinite(sc_tgt) && sc_tgt > 0
-                        err_hold = 10 * log10(median(seg) / sc_tgt);
-                    end
-                    if isfinite(err_hold)
-                        if err_hold > 0.4
-                            n_high = n_high + 1;
-                            n_low = 0;
-                            if n_high >= 5
-                                volt = volt - 1;
-                            end
-                        elseif err_hold < -0.4
-                            n_low = n_low + 1;
-                            n_high = 0;
-                            stalled = false;
-                            if k >= n0 + 8 && isfinite(sc0) && sc0 > 0
-                                if use_sum
-                                    aSc = SCrec(k-7:k-4);
-                                    bSc = SCrec(k-3:k);
-                                else
-                                    aSc = PKrec(k-7:k-4);
-                                    bSc = PKrec(k-3:k);
-                                end
-                                dA = median(10 * log10(max(aSc, realmin) / sc0), 'omitnan');
-                                dB = median(10 * log10(max(bSc, realmin) / sc0), 'omitnan');
-                                if isfinite(dA) && isfinite(dB) && (Vrec(k) - Vrec(k-7)) >= 20 && (dB - dA) < 0.3
-                                    stalled = true;
-                                end
-                            end
-                            if n_low >= 5 && ~stalled
-                                volt = volt + 1;
-                            end
-                        else
-                            n_high = 0;
-                            n_low = 0;
-                        end
-                        volt = min(max_mVpp, max(1, volt));
+                elseif isfinite(ctrl)
+                    if isfinite(sc_hi) && ctrl > sc_hi
+                        volt = max(1, volt - 1);
+                    elseif isfinite(sc_lo) && ctrl < sc_lo
+                        volt = min(max_mVpp, volt + 1);
                     end
                 end
                 rigol_dg2052_set_vpp_mV(fgen, volt);
+            end
+            % 电压已经写下，再刷新画面。闭环每发都画，避免界面停在假超声最后一屏。
+            ui.waveform(txmat(k, :), info.realFs, p.freq_mhz, '回读', struct('ch', 'tx', 'fft', true));
+            ui.waveform(datamat(k, :), info.realFs, p.freq_mhz, 'PCD', struct('ch', 'pcd', 'fft', true));
+            % 老师脚本：一帧高于 均值+3σ 就停，这一帧就是基线。
+            if strcmp(clock_mode, 'detect') && isfinite(arrive_level) && arrive_level > 0
+                nowv = ctrl_at(k);
+                if isfinite(nowv) && nowv > arrive_level
+                    n_arrive_hit = n_arrive_hit + 1;
+                    break;
+                end
             end
         end
     end
@@ -754,8 +746,24 @@ result = save_now();
     end
 
     function s = remain_us()
-        % 距离 duration_s 还剩多少墙钟秒；未开超声则为 0。
-        if isempty(t_us) || ~isfinite(us_total)
+        % SC1 / SC2 倒计时只看这一段。等微泡不倒计时。闭环从调压开始算 duration_s。
+        if isempty(t_us)
+            s = 0;
+            return;
+        end
+        if ~isempty(fb_origin)
+            s = max(0, p.duration_s - (toc(t_us) - fb_origin));
+            return;
+        end
+        if ignore_duration && isfinite(phase_limit_s)
+            s = max(0, phase_limit_s - toc(t_us));
+            return;
+        end
+        if ignore_duration
+            s = NaN;
+            return;
+        end
+        if ~isfinite(us_total)
             s = 0;
             return;
         end
@@ -763,8 +771,80 @@ result = save_now();
     end
 
     function tf = us_expired()
-        % 发生器应按墙钟打满 duration_s（含 PRF 空档），到点就停，不等「再采几帧」。
+        % 两次基线和等微泡不算进治疗时长。闭环从 fb_origin 起打满 duration_s。
+        if ignore_duration
+            tf = false;
+            return;
+        end
+        if ~isempty(fb_origin)
+            tf = toc(t_us) - fb_origin >= p.duration_s;
+            return;
+        end
         tf = ~isempty(t_us) && isfinite(us_total) && toc(t_us) >= us_total;
+    end
+
+    function v = ctrl_at(k)
+        v = NaN;
+        if use_sum
+            if k >= 1 && k <= numel(SCrec)
+                v = SCrec(k);
+            end
+        elseif k >= 1 && k <= numel(PKrec)
+            v = PKrec(k);
+        end
+    end
+
+    function v = seg_median(i1, i2)
+        % 过门限之后这一段的中位数。单帧尖峰不会把基线拽偏。
+        v = NaN;
+        if i2 < i1
+            return;
+        end
+        if use_sum
+            if i1 > numel(SCrec)
+                return;
+            end
+            x = SCrec(i1:min(i2, numel(SCrec)));
+        else
+            if i1 > numel(PKrec)
+                return;
+            end
+            x = PKrec(i1:min(i2, numel(PKrec)));
+        end
+        x = x(isfinite(x) & x > 0);
+        if ~isempty(x)
+            v = median(x);
+        end
+    end
+
+    function [mu, sd] = seg_mean_std(i1, i2)
+        % 老师脚本的本底：这一段的均值和标准差（除以 n-1，和 std 一样）。
+        mu = NaN;
+        sd = NaN;
+        if i2 < i1
+            return;
+        end
+        if use_sum
+            if i1 > numel(SCrec)
+                return;
+            end
+            x = SCrec(max(1, i1):min(i2, numel(SCrec)));
+        else
+            if i1 > numel(PKrec)
+                return;
+            end
+            x = PKrec(max(1, i1):min(i2, numel(PKrec)));
+        end
+        x = x(isfinite(x));
+        if isempty(x)
+            return;
+        end
+        mu = mean(x);
+        if numel(x) >= 2
+            sd = std(x);
+        else
+            sd = 0;
+        end
     end
 
     function tf = dummy_done()
@@ -1015,50 +1095,4 @@ function t = trig_from_mVpp(mV)
 % 取设定 Vpp 的 8%，限制在 15–150 mV：1 Vpp 约 80 mV，200 mVpp 约 16 mV。
 vpp_v = max(mV, 1) / 1000;
 t = min(0.15, max(0.015, 0.08 * vpp_v));
-end
-
-function mag = adapt_vstep_mV(err_db, want_up, is_ramp)
-% 爬升：开始远（≥2.5 dB）+35 mV；差 <1 dB 收到 2–4 mV。步距按本发/平均里更近目标的那个。
-if nargin < 3
-    is_ramp = true;
-end
-if ~(isfinite(err_db))
-    if is_ramp && want_up
-        mag = 80;
-    else
-        mag = 4;
-    end
-    return
-end
-a = abs(err_db);
-if is_ramp && want_up
-    % 小鼠只有两三分钟，USB 约 1 帧/秒。离目标远时大步，进黄带前收住。
-    if a >= 1.8
-        mag = 80;
-    elseif a >= 1.0
-        mag = 40;
-    elseif a >= 0.5
-        mag = 10;
-    else
-        mag = 3;
-    end
-    return
-end
-if ~want_up
-    if a >= 1.5
-        mag = 8;
-    elseif a >= 0.6
-        mag = 4;
-    else
-        mag = 2;
-    end
-    return
-end
-if a >= 0.8
-    mag = 4;
-elseif a >= 0.4
-    mag = 2;
-else
-    mag = 1;
-end
 end

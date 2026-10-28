@@ -16,6 +16,10 @@ opts.prf_hz = pick(S, 'prf_hz', 2);
 L = pcd_param_limits();
 opts.n_cycle = pick(S, 'n_cycle', L.n_cycle_default);
 opts.npts = pick(S, 'npts', L.npts_default);
+opts.drive = 'cw';
+if isstruct(S) && isfield(S, 'dbg_drive') && strcmpi(strtrim(char(string(S.dbg_drive))), 'burst')
+    opts.drive = 'burst';
+end
 
 % 频率/电压必须由界面明确给出（空框 / 非法值时 ui.debugfv() 返回 NaN）。
 % 这里报错，不兜底成 1.5 MHz / 20 mVpp —— 兜底等于在用户没填的时候照样开超声。
