@@ -1,1 +1,5 @@
-{"version":"0.1.9","url":"https://github.com/jiaxuanli2504-cell/Passive-Cavitation-Detection/releases/download/v0.1.9/PCD_Installer_v0.1.9.exe","notes":"﻿闭环按这个顺序走：先在 0 V 采 10 帧背景，门限是平均值加 3 倍波动。再开到检测电压，有一帧超过门限就说明微泡到了。这一帧不算基线，电压不动再采 10 帧，取中间值，然后关超声。之后按治疗电压重新打开，没到目标就每帧加 5 mV，到了以后在上下 0.2 dB 里用 1 mV 微调。0.5 dB 和 1 dB 都相对这 10 帧的中间值。示波器固定 1M 点、2 ms/格，只读脉冲那一段。"}
+{
+  "version": "0.1.9",
+  "url": "https://github.com/jiaxuanli2504-cell/Passive-Cavitation-Detection/releases/download/v0.1.9/PCD_Installer_v0.1.9.exe",
+  "notes": "闭环按这个顺序走：先在 0 V 采 10 帧背景，门限是平均值加 3 倍波动。再开到检测电压，有一帧超过门限就说明微泡到了。这一帧不算基线，电压不动再采 10 帧，取中间值，然后关超声。之后按治疗电压重新打开，没到目标就每帧加 5 mV，到了以后在上下 0.2 dB 里用 1 mV 微调。0.5 dB 和 1 dB 都相对这 10 帧的中间值。示波器固定 1M 点、2 ms/格，只读脉冲那一段。"
+}
