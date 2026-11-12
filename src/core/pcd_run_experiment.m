@@ -1,7 +1,8 @@
 function result = pcd_run_experiment(mode, ui)
 %PCD_RUN_EXPERIMENT
 %  'before'  阶段2：无微泡，猝发，CH1+CH2
-%  'open_mb' 阶段3：有微泡开环（输液泵已在跑，不等待注射）
+%  'open_mb' 阶段3：有微泡开环。脉冲和示波器窗都按 acq_ms（默认 6 ms），
+%            回读和 PCD 同一段。左边的周期数留给闭环，这里不改。
 %  'feedback'/'during'  0 V 采 10 帧本底，门限 = 均值 + 3×标准差。
 %  再开到检测电压，一帧超过门限只说明微泡到了，这一帧不当基线。
 %  电压保持不动，再采 10 帧，中位数才是基线，然后关输出。
@@ -45,6 +46,11 @@ else
     v_first = v_out;
 end
 % 先打开发生器，再写示波器。示波器用固定的 1M、2 ms/div，不再逐档试时基。
+% 有微泡开环按采集毫秒发脉冲，示波器窗跟这一发走。闭环不进这里。
+if strcmp(mode, 'open_mb')
+    p = apply_open_acq(p);
+    fprintf('开环采集 %.3f ms（%d 周期）。回读和 PCD 同一段。\n', p.acq_ms, p.n_cycle);
+end
 ui.status(sprintf('正在打开发生器  %.4g mVpp', v_first));
 t_us = start_burst(fgen, p, v_first);
 % 设置示波器若中途出错，也要把刚刚打开的输出关掉。
@@ -54,8 +60,7 @@ ui.status('发生器已打开。正在设置示波器。');
 % 触发改接到发生器后面板（另一路）时，电平是 TTL，不用这套毫伏。
 vpp_v = max(v_first, 1) / 1000;
 trig = trig_from_mVpp(v_first);
-ttlTrig = isfield(cfg, 'scope_trig_channel') && cfg.scope_trig_channel >= 1 ...
-    && cfg.scope_trig_channel <= 4 && round(cfg.scope_trig_channel) ~= cfg.scope_tx_channel;
+[trigCh, ttlTrig] = rigol_trig_channel(cfg);
 if ttlTrig
     trig = 1.5;
 end
@@ -70,11 +75,52 @@ scTx  = max(0.001, vpp_v / 1.4);
 scPcd = max(0.001, vpp_v / 1.4);
 writeline(scope, sprintf(':CHANnel%d:SCALe %.6g', cfg.scope_tx_channel, scTx));
 writeline(scope, sprintf(':CHANnel%d:SCALe %.6g', cfg.scope_pcd_channel, scPcd));
+% 手动时界面上的 mVpp 不是发生器真实输出。先读回读通道的峰峰值，
+% 触发电平按这个幅度来，不再用 1000 mVpp 算出的 80 mV。
+% 入库门限也改用测到的幅度，否则小信号过了边沿仍会被 200 mV 的门丢掉。
+accept_mV = v_out;
+if ~ttlTrig && L.manual
+    ui.status('手动：先读回读通道的峰峰值，再设触发电平。');
+    try
+        [trig_meas, vpp_seen] = peek_ch1_trig(scope, cfg.scope_tx_channel, p.period_s);
+        if isfinite(vpp_seen) && vpp_seen > 0.002
+            trig = trig_meas;
+            trig0 = trig;
+            writeline(scope, sprintf(':TRIGger:EDGE:LEVel %.8g', trig));
+            accept_mV = max(1, vpp_seen * 1000);
+            scTx = max(0.001, vpp_seen / 1.4);
+            writeline(scope, sprintf(':CHANnel%d:SCALe %.6g', cfg.scope_tx_channel, scTx));
+            try, writeline(scope, '*CLS'); catch, end
+            rigol_dho814_wf_geom('stale');
+        else
+            accept_mV = 20;
+            fprintf('手动 回读 CH%g 峰峰值只有 %.3g mV，发生器输出可能没开。触发电平仍是 %.3g mV\n', ...
+                cfg.scope_tx_channel, vpp_seen * 1e3, trig * 1e3);
+        end
+        fsNow = str2double(rigol_visa_query(scope, ':ACQuire:SRATe?'));
+        if isfinite(fsNow) && fsNow > 1e6 && isfield(info, 'fs_planned') ...
+                && info.fs_planned > 0 && abs(fsNow - info.fs_planned) / info.fs_planned > 0.02
+            info.realFs = fsNow;
+            info.fs_planned = fsNow;
+            info.acq_n = max(256, round(burst_s * fsNow));
+        end
+        fprintf('手动 回读 CH%g 峰峰值 %.3g mV，触发电平 %.3g mV\n', ...
+            cfg.scope_tx_channel, vpp_seen * 1e3, trig * 1e3);
+        ui.status(sprintf('手动 回读 CH%g  %.3g mVpp，触发 %.3g mV', ...
+            cfg.scope_tx_channel, vpp_seen * 1e3, trig * 1e3));
+    catch err
+        accept_mV = 20;
+        fprintf('手动没读到回读幅度（%s），触发电平仍按界面电压 %.3g mV\n', ...
+            err.message, trig * 1e3);
+        ui.status(sprintf('没读到回读幅度，触发电平仍是 %.0f mV', trig * 1e3));
+    end
+end
 if ttlTrig
     fprintf('PCD 第一档 %.4g mVpp  触发 CH%g 上升沿 %.2f V（发生器后面板，每发一个脉冲）\n', ...
-        v_first, round(cfg.scope_trig_channel), trig);
+        v_first, trigCh, trig);
 else
-    fprintf('PCD 第一档 %.4g mVpp  触发 %.3g mV  （闭环假超声按 base 设触发，勿用治疗电压）\n', v_first, trig * 1e3);
+    fprintf('PCD 第一档 %.4g mVpp  触发回读 CH%g 上升沿 %.3g mV\n', ...
+        v_first, cfg.scope_tx_channel, trig * 1e3);
 end
 % CH1 若接在功放前，回读仍是发生器 mVpp，不能当作声压。
 if isfinite(p.amp_gain) && p.amp_gain >= 40
@@ -126,14 +172,19 @@ end
 % 出问题时第一眼就该知道用的是哪条。
 if ttlTrig
     fprintf(['  锚点：独立触发通道 CH%g（硬件触发）→ 窗起点按示波器触发点直接算出，' ...
-        '不扫波形、与回读幅度无关。\n'], round(cfg.scope_trig_channel));
+        '不扫波形、与回读幅度无关。\n'], trigCh);
+elseif L.manual
+    fprintf(['  锚点：手动模式，回读 CH%g 上升沿。窗起点靠扫描包络，约 12 µs 偏置；' ...
+        '回读弱于约 20 mVpp 会失锁。电脑控制时仍用通道 %g。\n'], ...
+        cfg.scope_tx_channel, round(cfg.scope_trig_channel));
 else
     fprintf(['  锚点：回读 CH%g 的模拟边沿（电平=设定 Vpp 的 8%%），窗起点靠扫描包络，' ...
-        '有约 12 µs 偏置；回读弱于约 20 mVpp 会失锁 —— 建议接发生器 Trig Out 到空余通道。\n'], ...
+        '有约 12 µs 偏置；回读弱于约 20 mVpp 会失锁。\n'], ...
         cfg.scope_tx_channel);
 end
 datamat = [];
 txmat = [];
+last_live = [];   % 开环画面节流；闭环仍每发都画
 Vrec = [];
 Trec = [];    % 每帧入库墙钟（发生器 OUTPUT ON 起，秒）；Fig.6 横轴用它，不用 pulse #
 SCrec = [];
@@ -188,7 +239,7 @@ try
         clock_mode = 'bg';
         phase_limit_s = inf;
         cd_push();
-        run_loop(bg_n, 0, false, '本底 0 V，不要开泵');
+        run_loop(bg_n, 0, false, '本底 0 V，10 帧');
         if pcd_abort
             cd_off();
             result = save_now();
@@ -208,7 +259,7 @@ try
             det_n = inf;
         end
         rigol_dg2052_set_vpp_mV(fgen, base_v);
-        run_loop(det_n, base_v, false, sprintf('检测 %.4g mVpp，请开泵。一帧过门限即停', base_v));
+        run_loop(det_n, base_v, false, sprintf('检测 %.4g mVpp，一帧过门限即停', base_v));
         if pcd_abort
             cd_off();
             result = save_now();
@@ -269,7 +320,7 @@ try
         prefix = ['OpenMB_' sanitize_id(p.studyID)];
         t_us = tic;
         cd_push();
-        run_loop(inf, v_out, false, '开环');
+        run_loop(inf, v_out, false, sprintf('开环  采集 %.3f ms', p.acq_ms));
     else
         prefix = ['NoMB_' sanitize_id(p.studyID)];
         t_us = tic;
@@ -313,8 +364,13 @@ result = save_now();
 
     function S = pack_save()
         S = struct();
-        S.datamat = datamat;
-        S.txmat = txmat;
+        if n_good >= 1
+            S.datamat = datamat(1:min(n_good, size(datamat, 1)), :);
+            S.txmat = txmat(1:min(n_good, size(txmat, 1)), :);
+        else
+            S.datamat = [];
+            S.txmat = [];
+        end
         S.realFs = info.realFs;
         S.Vrealtime = Vrec;
         S.t_pulse_s = Trec;        % 每帧入库墙钟（OUTPUT ON 起，秒）；USB≠PRF，不能用 pulse #
@@ -489,11 +545,33 @@ result = save_now();
             if volt <= 0
                 frame_good = numel(chPcd) >= 256;
             else
-                frame_good = frame_ok(chPcd, chTx, okTx, volt, anchored);
+                % 手动的门限用测到的回读幅度。界面电压是灰的，不能拿来卡小信号。
+                v_chk = volt;
+                if L.manual && accept_mV > 0
+                    v_chk = accept_mV;
+                end
+                frame_good = frame_ok(chPcd, chTx, okTx, v_chk, anchored);
             end
             if ~frame_good
                 n_miss = n_miss + 1;
                 show_live(chTx, chPcd, realFs, do_fb);
+                % 手动时界面电压是灰的。这一屏回读的峰值如果低于当前触发电平，
+                % 边沿永远跨不过去，按屏幕上的幅度把电平放低。
+                if L.manual && ~ttlTrig && okTx && numel(chTx) >= 256
+                    pp_seen = max(chTx) - min(chTx);
+                    if pp_seen > 0.008 && pp_seen / 2 < trig
+                        trig = min(0.15, max(0.001, 0.25 * pp_seen / 2));
+                        try
+                            writeline(scope, sprintf(':TRIGger:EDGE:LEVel %.8g', trig));
+                        catch
+                        end
+                        accept_mV = max(1, pp_seen * 1000);
+                        wait_note = sprintf('回读 %.0f mVpp，触发电平改到 %.1f mV', ...
+                            pp_seen * 1e3, trig * 1e3);
+                        ui.status(sprintf('%s  %s  墙钟剩余 %.0f s', label, wait_note, remain_us()));
+                        continue;
+                    end
+                end
                 % 触发电平只按「连续」失败降档，且设下限。改之前 n_miss==1 就降一半，
                 % 而 n_miss 在任何成功帧后清零 —— 于是「成功一帧、失败一帧」交替时
                 % 电平一路棘轮到 10 µV，之后噪声在 PRF 空档里就能触发示波器，
@@ -508,8 +586,7 @@ result = save_now();
                     wait_note = sprintf('%s 连续三发没等到边沿，电平降到 %.0f mV（下限 %.0f mV），仍是单次', ...
                         pcd_scope_labels().txTag, trig * 1e3, 0.25 * trig0 * 1e3);
                 elseif ttlTrig
-                    wait_note = sprintf('CH%g 未触发，检查发生器后面板到这一路的 BNC', ...
-                        round(cfg.scope_trig_channel));
+                    wait_note = sprintf('CH%g 未触发，检查发生器后面板到这一路的 BNC', trigCh);
                 elseif ~okTx
                     % 只在「靠回读边沿触发」这条路上才会因为回读读失败丢帧：
                     % 那时锚点来自回读上的包络沿，没有回读就没有起点。
@@ -580,8 +657,9 @@ result = save_now();
             pulse = pulse + 1;
             n_good = n_good + 1;
             k = n_good;
-            datamat(k, :) = rowP; %#ok<AGROW>
-            txmat(k, :) = rowT; %#ok<AGROW>
+            [datamat, txmat] = grow_waves(datamat, txmat, k, numel(rowP));
+            datamat(k, :) = rowP;
+            txmat(k, :) = rowT;
             % 时域图放到改电压之后再推。画图要做 FFT，放在调压前面会把下一发的武装往后推。
             [F, Y, db] = pcd_spectrum(datamat(k, :), info.realFs);
             [sc, ic, ~, ~, M] = pcd_band_energy(Y, F, p.freq_mhz * 1e6, cfg.harmonic_bandwidth_hz, p.sc_harm);
@@ -613,8 +691,11 @@ result = save_now();
             Flrec(k) = M.floor; %#ok<AGROW>
             pp1 = (max(txmat(k, :)) - min(txmat(k, :))) * 1e3;
             pp2 = (max(datamat(k, :)) - min(datamat(k, :))) * 1e3;
-            % 闭环不每发再 FFT CH1：峰位只用于状态栏，用时域峰峰值判断有没有驱动。
-            if ~do_fb || mod(k, 10) == 1
+            % 开环测试：频谱图大约每 0.25 s 刷一次。每发都做两路 FFT 再推到网页，
+            % 下一发的触发要等画完，界面就一卡一卡。入库不受这节流影响。
+            % 闭环仍每发都画。CH1 频谱只在要上屏时算。
+            draw_live = do_fb || isempty(last_live) || toc(last_live) >= 0.25;
+            if draw_live && (~do_fb || mod(k, 10) == 1)
                 [F1, ~, db1] = pcd_spectrum(txmat(k, :), info.realFs);
                 [ch1pk, ch1db] = pcd_fft_peak_mhz(F1, db1, 0.3, 8);
             else
@@ -702,8 +783,11 @@ result = save_now();
                 rigol_dg2052_set_vpp_mV(fgen, volt);
             end
             % 电压已经写下，再刷新画面。闭环每发都画，避免界面停在假超声最后一屏。
-            ui.waveform(txmat(k, :), info.realFs, p.freq_mhz, '回读', struct('ch', 'tx', 'fft', true));
-            ui.waveform(datamat(k, :), info.realFs, p.freq_mhz, 'PCD', struct('ch', 'pcd', 'fft', true));
+            if draw_live
+                ui.waveform(txmat(k, :), info.realFs, p.freq_mhz, '回读', struct('ch', 'tx', 'fft', true));
+                ui.waveform(datamat(k, :), info.realFs, p.freq_mhz, 'PCD', struct('ch', 'pcd', 'fft', true));
+                last_live = tic;
+            end
             % 老师脚本：一帧高于 均值+3σ 就停，这一帧就是基线。
             if strcmp(clock_mode, 'detect') && isfinite(arrive_level) && arrive_level > 0
                 nowv = ctrl_at(k);
@@ -890,6 +974,34 @@ result = save_now();
     end
 end
 
+function [datamat, txmat] = grow_waves(datamat, txmat, k, n)
+%GROW_WAVES 按块加行。6 ms 一帧约 19 万点，逐帧 [M; row] 会把整表复制一遍，
+% 测到后面越来越卡。
+if size(datamat, 1) >= k && size(datamat, 2) == n
+    return
+end
+add = max(16, k - size(datamat, 1));
+if isempty(datamat) || size(datamat, 2) ~= n
+    datamat = zeros(add, n);
+    txmat = zeros(add, n);
+    return
+end
+datamat(end + add, 1) = 0;
+txmat(end + add, 1) = 0;
+end
+
+function p = apply_open_acq(p)
+%APPLY_OPEN_ACQ 有微泡开环：脉冲长度 = 采集毫秒，示波器只读这一段。
+% 周期数上限 10000。1.5 MHz 下 6 ms 是 9000 周期，装得下。
+% 装不下就用上限对应的长度，并把 p.acq_ms 改成实际值。
+L = pcd_param_limits();
+nc = round(p.acq_ms * 1e-3 * p.freq_mhz * 1e6);
+nc = max(L.n_cycle_min, min(nc, L.n_cycle_max));
+p.n_cycle = nc;
+p.cav_pct = pcd_duty('cav_pct', p.n_cycle, p.freq_mhz, p.prf_hz);
+p.acq_ms = p.n_cycle / (p.freq_mhz * 1e6) * 1e3;
+end
+
 function t0 = start_burst(fgen, p, volt)
 %START_BURST 下发猝发并开射频。返回墙钟 tic：倒计时从 OUTPUT ON 这一刻起
 % （假超声也是超声）。pause 只为等第一发进示波器，不计入「还没开始」。
@@ -946,6 +1058,13 @@ if abs(scPcd - scPcd0) / max(scPcd0, 1e-6) > 0.08
     rigol_dho814_wf_geom('stale');
 else
     scPcd = scPcd0;
+end
+if abs(scTx - scTx0) / max(scTx0, 1e-6) > 0.08 || abs(scPcd - scPcd0) / max(scPcd0, 1e-6) > 0.08
+    % 量程命令若在错误队列里留一条，下一发 DATA? 会不回块，读取卡满超时。
+    try
+        writeline(scope, '*CLS');
+    catch
+    end
 end
 end
 
@@ -1087,6 +1206,78 @@ if ~any(m)
 else
     dbp = max(db(m));
 end
+end
+
+function [trig, vpp] = peek_ch1_trig(scope, ch, period_s)
+%PEEK_CH1_TRIG 先让大约一个 PRF 落在屏幕上，停下来再问峰峰值。
+% 示波器还在 RUN 时不回答查询，上次就是这样退回了 80 mV。
+% 问不到就用峰值检测读屏幕：1.5 MHz 在慢时基上会被抽掉，峰值检测仍留着幅度。
+% 不读整段内存。返回前改回 2 ms/div、普通采样、RAW、单次触发。
+if ~(isfinite(period_s) && period_s > 0)
+    period_s = 0.2;
+end
+trig = 0.002;
+oldT = 60;
+try, oldT = scope.Timeout; catch, end
+cleaner = onCleanup(@() restore_peek_timebase(scope, oldT)); %#ok<NASGU>
+try, scope.Timeout = 3; catch, end
+try, writeline(scope, '*CLS'); catch, end
+writeline(scope, ':ACQuire:TYPE PEAK');
+writeline(scope, sprintf(':TIMebase:MAIN:SCALe %.12g', max(period_s, 0.02) / 10));
+writeline(scope, ':TIMebase:MAIN:OFFSet 0');
+writeline(scope, ':TRIGger:SWEep AUTO');
+writeline(scope, ':RUN');
+pause(period_s + 0.2);
+writeline(scope, ':STOP');
+pause(0.05);
+try, writeline(scope, '*CLS'); catch, end
+vpp = query_vpp(scope, ch);
+if ~(isfinite(vpp) && vpp >= 0 && vpp < 10)
+    rigol_dho814_wf_geom('reset');
+    y = rigol_dho814_read_channel(scope, ch, 1e6, 'NORM');
+    if isempty(y)
+        error('pcd:peek', '示波器没有返回峰峰值');
+    end
+    vpp = max(y) - min(y);
+end
+if ~(isfinite(vpp) && vpp >= 0 && vpp < 10)
+    error('pcd:peek', '示波器没有返回峰峰值');
+end
+half = vpp / 2;
+trig = min(0.08 * vpp, 0.45 * half);
+trig = min(0.15, max(trig, 0.001));
+end
+
+function vpp = query_vpp(scope, ch)
+% 先停稳再问。两条都试，这台固件只认其中一条。
+vpp = NaN;
+cmds = {
+    sprintf(':MEASure:ITEM? VPP,CHANnel%d', ch)
+    sprintf(':MEASure:STATistic:ITEM? CURRent,VPP,CHANnel%d', ch)
+    };
+for i = 1:numel(cmds)
+    try
+        txt = rigol_visa_query(scope, cmds{i});
+        v = str2double(strtrim(txt));
+        if isfinite(v) && v >= 0 && v < 10
+            vpp = v;
+            return
+        end
+    catch
+    end
+end
+end
+
+function restore_peek_timebase(scope, oldT)
+try, writeline(scope, ':STOP'); catch, end
+try, writeline(scope, '*CLS'); catch, end
+try, writeline(scope, ':ACQuire:TYPE NORMal'); catch, end
+try, writeline(scope, ':WAVeform:MODE RAW'); catch, end
+try, writeline(scope, ':TIMebase:MAIN:SCALe 0.002'); catch, end
+try, writeline(scope, ':TIMebase:MAIN:OFFSet 0'); catch, end
+try, writeline(scope, ':TRIGger:SWEep SINGle'); catch, end
+try, rigol_dho814_wf_geom('reset'); catch, end
+try, scope.Timeout = oldT; catch, end
 end
 
 function t = trig_from_mVpp(mV)

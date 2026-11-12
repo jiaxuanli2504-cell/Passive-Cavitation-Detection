@@ -128,13 +128,6 @@ if isfinite(f0) && f0 > 0
             'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontWeight', 'bold');
     end
 end
-if ~isempty(emi_col)
-    for e = [2.85 4.18]
-        if e <= f_max
-            xline(ax, e, '--', 'Color', emi_col, 'LineWidth', 0.9);
-        end
-    end
-end
 grid(ax, 'on');
 xlim(ax, [0 f_max]);
 xlabel(ax, 'Frequency (MHz)');
@@ -209,15 +202,6 @@ if isfinite(f0) && f0 > 0
         text(ax, 2 * f0, yl(2), sprintf('2f=%.2f', 2 * f0), 'FontSize', 9, ...
             'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', ...
             'Color', [0.15 0.15 0.15], 'FontWeight', 'bold');
-    end
-end
-for e = [2.85 4.18]
-    if e <= f_max
-        xline(ax, e, '--', 'Color', emi_col, 'LineWidth', 0.9);
-        yl = ylim(ax);
-        text(ax, e, yl(1), ' 干扰', 'FontSize', 8, 'Color', emi_col, ...
-            'HorizontalAlignment', 'left', 'VerticalAlignment', 'bottom', ...
-            'Rotation', 90);
     end
 end
 grid(ax, 'on');

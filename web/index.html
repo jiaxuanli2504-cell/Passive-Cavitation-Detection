@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PCD · DHO814 / DG2052</title>
 <link rel="stylesheet" href="vendor/uPlot.min.css">
-<link rel="stylesheet" href="app.css?v=wiring1">
+<link rel="stylesheet" href="app.css?v=manual1">
 <script src="vendor/uplot.iife.min.js"></script>
-<script src="app.js?v=win66"></script>
+<script src="app.js?v=win68"></script>
 <script defer src="vendor/alpine.min.js"></script>
 </head>
 <!-- 参数名与 MATLAB 侧存档字段一致（pcd_gui_params），两边共用一套词汇，
@@ -88,36 +88,36 @@
         <span class="unit" x-text="scHarmHint()"></span>
       </div>
       <!-- 闭环从假超声爬到上限，不读这一格。2/3 开环才用固定治疗电压。 -->
-      <div class="row" x-show="tab!=='fb'">
+      <div class="row" x-show="tab!=='fb'" :class="{'is-off': awgMode==='manual'}">
         <label>治疗电压</label>
-        <input type="number" step="1" x-model.number="p.volt_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+        <input type="number" step="1" x-model.number="p.volt_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
         <span class="unit">mVpp</span>
       </div>
       <!-- 功放增益：V_load ≈ volt_mVpp/1000 * amp_gain。CH1 若接在功放前，回读仍是发生器 mVpp，不能当作声压。 -->
-      <div class="row">
+      <div class="row" :class="{'is-off': awgMode==='manual'}">
         <label>功放增益</label>
-        <input type="number" step="1" min="1" x-model.number="p.amp_gain" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+        <input type="number" step="1" min="1" x-model.number="p.amp_gain" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
         <span class="unit">×</span>
       </div>
-      <div class="hint" x-text="ampLoadHint()" title="CH1 若接在功放前，回读仍是发生器 mVpp，不能当作声压"></div>
-      <div class="row">
+      <div class="hint" :class="{'is-off': awgMode==='manual'}" x-text="ampLoadHint()" title="CH1 若接在功放前，回读仍是发生器 mVpp，不能当作声压"></div>
+      <div class="row" :class="{'is-off': awgMode==='manual'}">
         <label>PRF</label>
-        <input type="number" step="0.1" x-model.number="p.prf_hz" @input="onDutyDrivers(false)" @change="onDutyDrivers(true)" :disabled="busy">
+        <input type="number" step="0.1" x-model.number="p.prf_hz" @input="onDutyDrivers(false)" @change="onDutyDrivers(true)" :disabled="busy || awgMode==='manual'">
         <span class="unit">Hz</span>
       </div>
       <!-- 空化率 duty = T_on/PRI = n_cycle * PRF / f0_Hz；界面百分数 cav_pct = 100*duty。
            n_cycle = (cav_pct/100) * f0_Hz / PRF。改空化率更新周期数，改周期数/频率/PRF 更新空化率。
            周期数是 DG2052 BurstCount，必须留着。与 src/core/pcd_duty.m 同一套公式。 -->
-      <div class="row">
+      <div class="row" :class="{'is-off': awgMode==='manual'}">
         <label>空化率</label>
-        <input type="number" step="any" min="0" x-model.number="p.cav_pct" @input="onCavPct(false)" @change="onCavPct(true)" :disabled="busy">
+        <input type="number" step="any" min="0" x-model.number="p.cav_pct" @input="onCavPct(false)" @change="onCavPct(true)" :disabled="busy || awgMode==='manual'">
         <span class="unit">%</span>
       </div>
       <!-- 周期数 min/max 必须与 src/core/pcd_param_limits.m、web/app.js 一致。
            软件上限 10000；超过就立刻截成 10000 并写回输入框。截断后空化率也要按真实 n_cycle 写回。 -->
-      <div class="row">
+      <div class="row" :class="{'is-off': awgMode==='manual'}">
         <label>周期数</label>
-        <input type="number" step="1" min="1" max="10000" x-model.number="p.n_cycle" @input="onNCycle(false)" @change="onNCycle(true)" :disabled="busy">
+        <input type="number" step="1" min="1" max="10000" x-model.number="p.n_cycle" @input="onNCycle(false)" @change="onNCycle(true)" :disabled="busy || awgMode==='manual'">
         <span class="unit">cyc</span>
       </div>
       <div class="row">
@@ -161,9 +161,9 @@
             <input type="number" step="0.01" x-model.number="p.dbg_freq" @input="pushParams(false)" @change="pushParams(true)">
             <span class="unit">MHz</span>
           </div>
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label>电压</label>
-            <input type="number" step="1" x-model.number="p.dbg_volt" @input="pushParams(false)" @change="pushParams(true)">
+            <input type="number" step="1" x-model.number="p.dbg_volt" @input="pushParams(false)" @change="pushParams(true)" :disabled="awgMode==='manual'">
             <span class="unit">mVpp</span>
           </div>
           <div class="field">
@@ -186,7 +186,14 @@
       </div>
 
       <div class="step-bar" :class="{'is-on': tab==='open'}">
-        <div class="step-hint">开环</div>
+        <div class="step-hint">有微泡开环。这一发的脉冲和示波器窗都按采集时间，回读和 PCD 同一段。闭环仍用左边的周期数。</div>
+        <div class="step-fields">
+          <div class="field">
+            <label title="开环每一发采这么长。发生器脉冲和示波器窗一起改">采集</label>
+            <input type="number" step="0.1" min="0.1" x-model.number="p.acq_ms" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+            <span class="unit">ms</span>
+          </div>
+        </div>
         <div class="btns step-btns">
           <button type="button" @click="action('openMB')" :disabled="busy">开始开环</button>
         </div>
@@ -195,31 +202,31 @@
       <div class="step-bar" :class="{'is-on': tab==='fb'}">
         <div class="step-hint">闭环</div>
         <div class="step-fields">
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label title="0.2 MPa 对应的发生器电压。过门限后这一档保持不动，再采 10 帧，中位数才是基线">检测电压</label>
-            <input type="number" step="1" min="1" x-model.number="p.base_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+            <input type="number" step="1" min="1" x-model.number="p.base_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
             <span class="unit">mVpp</span>
           </div>
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label title="相对过门限后再采的 10 帧中位数。刚过线的那一帧不算进去">目标</label>
-            <input type="number" step="0.1" x-model.number="p.target_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+            <input type="number" step="0.1" x-model.number="p.target_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
             <span class="unit">dB</span>
           </div>
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label title="老师脚本里 IC 要累计 1000 次才改目标，等于没开。这里只显示，不因 IC 改电压">IC</label>
-            <input type="number" step="0.1" x-model.number="p.ic_limit_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+            <input type="number" step="0.1" x-model.number="p.ic_limit_db" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
             <span class="unit">dB</span>
           </div>
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label>控制量</label>
-            <select x-model="p.ctrl_metric" @change="pushParams(true)" :disabled="busy">
+            <select x-model="p.ctrl_metric" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
               <option value="2f_window_sum">2f 窗求和</option>
               <option value="2f_peak_over_floor">2f 峰/底</option>
             </select>
           </div>
-          <div class="field">
+          <div class="field" :class="{'is-off': awgMode==='manual'}">
             <label>上限</label>
-            <input type="number" step="1" x-model.number="p.max_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy">
+            <input type="number" step="1" x-model.number="p.max_mVpp" @input="pushParams(false)" @change="pushParams(true)" :disabled="busy || awgMode==='manual'">
             <span class="unit">mVpp</span>
           </div>
         </div>

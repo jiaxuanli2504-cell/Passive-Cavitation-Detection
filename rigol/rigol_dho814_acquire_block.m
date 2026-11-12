@@ -39,8 +39,10 @@ tx = cfg.scope_tx_channel;
 oldT = [];
 try
     oldT = dev.Timeout;
-    % 波形块偶尔传不完。最多等 8 秒，不要用连接上的 60 秒把界面冻住。
-    dev.Timeout = 8;
+    % 切片大约 0.4 MB，整段内存也就 2 MB，正常远小于 1 秒。
+    % 示波器不回块时，原来 8 秒再试一次，界面会卡大约 16 秒
+    % （2026-11-06 开环第 1 帧后空了 17.7 秒，就是这一下）。
+    dev.Timeout = 3;
 catch
 end
 
@@ -50,13 +52,8 @@ xinc = NaN;
 anchor_i = [];   % 先占住：里面有多处提前 return，不留到 catch 才算未定义
 crop_mode = 'none';
 % 配了独立触发通道 → 触发时刻就是这一发的起点，锚点可以算出来，不必扫波形。
-% 判据与 rigol_dho814_setup 里 ttlTrig 同源：触发通道存在且不是回读通道。
-hwTrig = false;
-if isfield(cfg, 'scope_trig_channel') && isnumeric(cfg.scope_trig_channel) ...
-        && isscalar(cfg.scope_trig_channel) && isfinite(cfg.scope_trig_channel)
-    tc = round(double(cfg.scope_trig_channel));
-    hwTrig = tc >= 1 && tc <= 4 && tc ~= tx;
-end
+% 与 rigol_dho814_setup 同一条：手动模式不算独立触发，即使用配置里写着通道 3。
+[~, hwTrig] = rigol_trig_channel(cfg);
 try
     if strcmpi(mode, 'live')
         % RAW 只能在 STOP 后读。调试若只 STOP 不 RUN，第一帧用的是 setup 里
@@ -313,17 +310,18 @@ xorigin = NaN;
 if nargin < 4
     i0 = [];
 end
-for attempt = 1:2
+try
+    [y, xinc, xorigin, i0] = rigol_dho814_read_channel(dev, ch, npts, 'RAW', i0);
+catch
+    % 同一屏再要一次只会再堵满超时。清掉错误，交给外面的下一次 :SINGle 重采。
+    y = [];
+    xinc = NaN;
+    xorigin = NaN;
+    i0 = [];
     try
-        [y, xinc, xorigin, i0] = rigol_dho814_read_channel(dev, ch, npts, 'RAW', i0);
-        return
+        writeline(dev, '*CLS');
+        writeline(dev, ':STOP');
     catch
-        try
-            writeline(dev, '*CLS');
-            writeline(dev, ':STOP');
-        catch
-        end
-        i0 = [];
     end
 end
 end

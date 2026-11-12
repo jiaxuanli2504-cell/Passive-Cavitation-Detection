@@ -1,29 +1,26 @@
 function [lines, note] = pcd_wiring(cfg)
 %PCD_WIRING 本实验室这套仪器（DG2052 + DHO814）的接线方式，按当前配置生成。
 %
-% 为什么要把接线写进界面：这套接法有四处不显然的地方，接错任何一处都**不会报错**，
-% 只会「数据看着正常但其实不对」——
-%   1) 回读不走功放前的分路，而用发生器的第二个通道做副本：功放前接三通会把
-%      驱动分压，幅度口径就不准了；
-%   2) 副本通道必须由主通道后面板 TrigOut 做外部触发，否则两路猝发各起各的
-%      （面板 Align 没有 SCPI 命令，参数相同也不保证对齐）；
-%   3) DHO814 后面板没有 EXT TRIG 插座，那条 TTL 只能进 CH1–CH4 里的某一路；
-%   4) 主通道后面板 TrigOut 进副本通道后面板，再从副本后面板分一路到示波器触发。
+% 回读从功放前的三通取得。发生器主通道声明 50 Ω，示波器这一路保持 1 MΩ，
+% 三通上读到的就是功放输入端的电压。示波器若拨成 50 Ω，会和功放并联，幅度变低。
+% DHO814 后面板没有 EXT TRIG，TrigOut 只能进 CH1–CH4 里空着的一路。
 %
 % 全部从 rigol_instr_config 的通道号生成，用户改了通道号，提示会跟着改。
 if nargin < 1 || isempty(cfg)
     cfg = rigol_instr_config();
 end
 awg  = num_of(cfg, 'awg_channel', 1);
-mon  = num_of(cfg, 'awg_monitor_channel', 0);
 tx   = num_of(cfg, 'scope_tx_channel', 1);
 pcd  = num_of(cfg, 'scope_pcd_channel', 2);
 trig = num_of(cfg, 'scope_trig_channel', 0);
 manual = isfield(cfg, 'awg_mode') && strcmpi(strtrim(char(string(cfg.awg_mode))), 'manual');
 
 if manual
-    lines = {'手动信号源模式：电脑不控制发生器。下面这套接线只在「电脑控制 DG2052」时才成立。'};
-    note = lines{1};
+    lines = { ...
+        '手动信号源：电脑不控制发生器。频率、电压、PRF、周期数在发生器面板上设。', ...
+        sprintf('示波器 CH%d 同时是回读和触发（上升沿）。这一路保持 1 MΩ。', tx), ...
+        sprintf('通道 %d 的 TrigOut 只在切回「电脑控制」时使用，手动不要接。', max(trig, 1))};
+    note = strjoin(lines, newline);
     return
 end
 
@@ -34,40 +31,25 @@ clash = indep_trig && trig == pcd;   % 真正接错的只有「触发通道 = PC
 
 L = {};
 L{end + 1} = sprintf('① 发生器前面板 CH%d → 功放 → 换能器', awg);
-if mon > 0
-    L{end + 1} = sprintf('② 发生器前面板 CH%d → 示波器 CH%d（回读）', mon, tx);
-else
-    L{end + 1} = sprintf('② 示波器 CH%d ← 回读（未启用镜像通道，只能从功放前分路取得）', tx);
-end
+L{end + 1} = sprintf('② 功放前三通 → 示波器 CH%d（回读，这一路保持 1 MΩ）', tx);
 L{end + 1} = sprintf('③ 示波器 CH%d ← PCD', pcd);
-if mon > 0 && indep_trig
-    L{end + 1} = sprintf('④ 发生器后面板 CH%d → 发生器后面板 CH%d（外触发，两路一起出脉冲）', awg, mon);
-    L{end + 1} = sprintf('⑤ 发生器后面板 CH%d 再分一路 → 示波器 CH%d（触发）', mon, trig);
-elseif indep_trig
+if indep_trig
     L{end + 1} = sprintf('④ 发生器后面板 CH%d TrigOut → 示波器 CH%d（触发）', awg, trig);
 else
     L{end + 1} = sprintf(['④ 未设独立触发通道：改为示波器 CH%d 的模拟边沿触发，' ...
         '窗起点只能靠扫回读包络（约 12 µs 偏置，且回读弱于 ~20 mVpp 会失锁）'], tx);
 end
 
-% 配置自检：这几条接错都不会报错，只能在这里提醒
 W = {};
-if mon > 0 && mon == awg
-    W{end + 1} = sprintf('⚠ 回读镜像通道不能和主输出通道相同（都是 CH%d）', awg);
-end
 if clash
     W{end + 1} = sprintf('⚠ 触发通道 CH%d 和 PCD 通道撞了同一路，请另选一路空闲通道', trig);
 end
-if mon > 0 && ~indep_trig
-    W{end + 1} = ['⚠ 启用了回读镜像但没有独立触发通道：副本通道靠 TrigOut 外触发才出波形，' ...
-        '缺这根线它一直是空的（回读与削顶检测会静默退化成噪声）'];
-end
-if trig >= 1 && trig == tx && mon > 0
+if trig >= 1 && trig == tx
     W{end + 1} = sprintf(['提示：触发 CH = 回读 CH%d 等价于填 0，窗起点会退回扫包络。' ...
         '把 TrigOut 接到一路空闲通道再填那个通道号，才能按触发几何精确定点。'], tx);
 end
-if mon == 0 && ~indep_trig
-    W{end + 1} = '⚠ 既没有镜像通道也没有独立触发通道：回读与触发都压在回读那一路的模拟边沿上';
+if ~indep_trig
+    W{end + 1} = '⚠ 没有独立触发通道：回读与触发都压在回读那一路的模拟边沿上';
 end
 
 lines = [L, W];

@@ -96,6 +96,11 @@ p.cav_pct = pcd_duty('cav_pct', p.n_cycle, p.freq_mhz, p.prf_hz);
 % V_load ≈ volt_mVpp/1000 * amp_gain ：功放在发生器后时的负载峰峰值（Vpp）。
 % CH1 若接在功放前，回读仍是发生器 mVpp，不能当作声压。
 p.v_load_Vpp = (p.volt_mVpp / 1000) * p.amp_gain;
+% 开环采集时长（ms）。只在有微泡开环里改脉冲和示波器窗；闭环仍用上面的周期数。
+p.acq_ms = opt(S, 'acq_ms', 6);
+if ~(isfinite(p.acq_ms) && p.acq_ms > 0)
+    p.acq_ms = 6;
+end
 p.period_s = 1 / p.prf_hz;
 % n_expect = 墙钟 duration_s 内发生器按 PRF 会打的猝发数。采集停靠墙钟，
 % 不靠采满这个数（USB ~1 帧/s，远少于 PRF）。

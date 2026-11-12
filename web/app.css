@@ -157,6 +157,8 @@ select:hover:not(:disabled){border-color:#39424E}
 input[type=text]:focus,input[type=number]:focus,.row > select:focus{
   border-color:var(--btn);box-shadow:0 0 0 3px var(--focus-ring);background:#12161B}
 input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
+.row.is-off > label,.row.is-off > .unit,.hint.is-off,
+.step-bar .field.is-off > label,.step-bar .field.is-off > .unit{opacity:.4}
 input::placeholder{color:#5C6673}
 input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 input[type=number]{-moz-appearance:textfield}

@@ -140,11 +140,26 @@ if do_fft
     end
     fw = f_mhz(keep);
     dbw = db(keep);
+    fw = fw(:).';
+    dbw = dbw(:).';
     m = numel(fw);
+    % 不能隔 N 点抽一个。3.00 MHz 的二次谐波往往只有一两格宽，
+    % 抽点会把它整根丢掉，屏幕上看不到，存盘的全分辨率图里还有。
+    % 每段留最高的那一格，窄峰还在它自己的频率上。
     fstep = max(1, ceil(m / MAXP));
-    si = 1:fstep:m;
-    S.f = fw(si);
-    S.db = dbw(si);
+    if fstep <= 1
+        S.f = fw;
+        S.db = dbw;
+    else
+        nkeep = ceil(m / fstep);
+        dbp = reshape([dbw, -inf(1, nkeep * fstep - m)], fstep, nkeep);
+        fp = reshape([fw, nan(1, nkeep * fstep - m)], fstep, nkeep);
+        [S.db, j] = max(dbp, [], 1);
+        S.f = fp(sub2ind([fstep, nkeep], j, 1:nkeep));
+        ok = isfinite(S.f);
+        S.f = S.f(ok);
+        S.db = S.db(ok);
+    end
     S.f0 = f0;
     S.f_max = f_max;
     S.marks = marks_for(f0, ch);
@@ -160,19 +175,21 @@ note = '';
 broad = any(strcmp(kind, {'broad', 'pcd', 'noise'}));
 if broad
     if n / fs > 0.5e-3
-        % 6 ms 里近万个周期，整段抽点或逐段画最大最小都会糊成色块。
-        % 屏幕只看触发后开头 10 个周期；整段有没有铺满，看保存的峰峰值图。
-        ncy = 10;
-        if ~(isfinite(f0) && f0 > 0)
-            f0 = 1.5;
+        % 6 ms 里近万个周期，整段正弦会糊成色块。改画每 0.2 ms 的峰峰值，
+        % 采集时就能看到这一发有没有铺满，不用等存盘。
+        bin_s = 0.2e-3;
+        nb = max(8, round(bin_s * fs));
+        nbin = max(1, floor(n / nb));
+        dt_us = zeros(1, nbin);
+        yw = zeros(1, nbin);
+        for i = 1:nbin
+            i0 = (i - 1) * nb + 1;
+            i1 = min(n, i * nb);
+            seg = y(i0:i1);
+            yw(i) = max(seg) - min(seg);
+            dt_us(i) = ((i0 + i1) / 2 - 1) / fs * 1e6;
         end
-        nwin = max(32, round(ncy / (f0 * 1e6) * fs));
-        nwin = min(n, nwin);
-        step = max(1, ceil(nwin / MAXP));
-        ti = 1:step:nwin;
-        dt_us = (ti - 1) / fs * 1e6;
-        yw = y(ti);
-        note = '开头 10 周期';
+        note = sprintf('整段 %.2f ms 峰峰值', n / fs * 1e3);
         return
     end
     % 整段降采样：无微泡 PCD 是底噪，截 16 个「周期」只会画出一个毛刺
@@ -267,19 +284,19 @@ end
 end
 
 function mk = marks_for(f0, ch)
-% CH1：f0 及谐波淡虚线。CH2：只标 f0 / 2f（1.5 MHz 时 2f=3.0），
-% 另两条琥珀线是实验室固定干扰 2.85、4.18 MHz，不是二次谐波。
+% CH1：f0 及谐波淡虚线。CH2：只标 f0、IC。2f 的竖线由前端画。
+% 2.85 和 4.18 MHz 没有稳定的峰，不再画金色虚线。
 blank = struct('f', {}, 'main', {}, 'kind', {}, 'label', {});
 if ~(isscalar(f0) && isfinite(f0) && f0 > 0)
     mk = blank;
     return;
 end
 if nargin >= 2 && strcmp(ch, 'pcd')
-    % 3 MHz（2f/SC）不发竖线，只在前端写 SC 字，避免白线盖住峰。
-    mk = struct('f', {f0, 2.2 * f0, 2.85, 4.18}, ...
-        'main', {false, false, false, false}, ...
-        'kind', {'harm', 'ic', 'emi', 'emi'}, ...
-        'label', {'f0', 'IC', '干扰', '干扰'});
+    % 3 MHz（2f）的竖线和「3.0」由前端画。
+    mk = struct('f', {f0, 2.2 * f0}, ...
+        'main', {false, false}, ...
+        'kind', {'harm', 'ic'}, ...
+        'label', {'f0', 'IC'});
     return;
 end
 mults = [0.5 1 1.5 2.5 3];

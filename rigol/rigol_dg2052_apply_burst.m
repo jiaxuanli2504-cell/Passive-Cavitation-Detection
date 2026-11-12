@@ -1,15 +1,9 @@
 function rigol_dg2052_apply_burst(dev, ch, freq_mhz, ampl_mVpp, phase_deg, n_cycle, period_s)
-%RIGOL_DG2052_APPLY_BURST 正弦 N 周期猝发，并同步配置"回读镜像通道"。
+%RIGOL_DG2052_APPLY_BURST 正弦 N 周期猝发。
 %
 % 本机固件要求：先 BURSt ON，再写 NCYCles / PERiod 与触发源（burst 关闭时写这些
 % 会被静默忽略或返回 -220）。这一点是实测出来的，顺序不能改。
-%
-% 回读镜像（rigol_instr_config.awg_monitor_channel > 0）：
-%   示波器的回读通道接在发生器的另一个通道上时，那个通道必须发出与主通道**同一个**
-%   猝发，否则回读看到的是出厂默认信号（1 kHz / 5 Vpp / 输出关闭）。
-%   镜像通道的猝发触发源设为 EXTernal，由主通道后面板 TrigOut 启动 —— 两路因此
-%   同起点，不需要相位对齐（面板 Align 按键没有 SCPI 命令，参数相同也不保证对齐，
-%   见 DG2000 用户手册 2-13「同相位」）。
+% 负载声明必须在写 VOLTage 之前，开机默认是高阻，这里钉成 50 Ω。
 %
 % 软件 NCYCles 上限与 pcd_param_limits.n_cycle_max 一致（10000）；不要在这里
 % 悄悄截成更小的数，否则界面显示 10000、仪器却按旧上限跑。
@@ -69,48 +63,6 @@ sl = strtrim(char(writeread(dev, sprintf(':%s:BURSt:TRIGger:TRIGOut?', src))));
 if ~startsWith(upper(sl), 'POS')
     error('rigol:dg2052:trigout', ...
         '猝发触发输出未能设为上升沿（回读 %s）。后面板不会给出每发一次的脉冲。', sl);
-end
-
-% ---- 回读镜像通道：同一波形，外触发，由主通道 TrigOut 启动 ----
-[mon, mon_load] = rigol_dg2052_monitor();
-if mon > 0 && mon ~= ch
-    apply_mirror(dev, mon, freq_hz, vpp, nc, mon_load);
-end
-end
-
-function apply_mirror(dev, ch, freq_hz, vpp, nc, load_ohms)
-%APPLY_MIRROR 把镜像通道配成主通道的副本，触发源设为外触发。
-% 两处顺序都不能动：
-%   1) 负载声明要在写 VOLTage 之前 —— 补偿只在写幅度时算一次（实测，反了就是 2 倍）；
-%   2) BURSt ON 要在写触发源之前 —— 否则被静默忽略（实测无报错、回读仍是 INT）。
-msrc = sprintf('SOURce%d', ch);
-rigol_dg2052_load(dev, ch, load_ohms);
-writeline(dev, sprintf(':%s:FUNCtion SINusoid', msrc));
-writeline(dev, sprintf(':%s:FREQuency %.12g', msrc, freq_hz));
-writeline(dev, sprintf(':%s:VOLTage:UNIT VPP', msrc));
-writeline(dev, sprintf(':%s:VOLTage %.12g', msrc, vpp));
-writeline(dev, sprintf(':%s:BURSt:MODE TRIG', msrc));
-writeline(dev, sprintf(':%s:BURSt:STATe ON', msrc));
-pause(0.08);
-writeline(dev, sprintf(':%s:BURSt:NCYCles %d', msrc, nc));
-writeline(dev, sprintf(':%s:BURSt:TDELay 0', msrc));
-pause(0.05);
-writeline(dev, sprintf(':%s:BURSt:TRIGger:SOURce EXTernal', msrc));
-pause(0.05);
-
-% 静默失效比报错难查：必须回读确认真的切到 EXT，否则回读通道永远没有输出。
-ms_rd = upper(strtrim(char(writeread(dev, sprintf(':%s:BURSt:TRIGger:SOURce?', msrc)))));
-if ~startsWith(ms_rd, 'EXT')
-    error('rigol:dg2052:mirror', ...
-        ['镜像通道 CH%d 的猝发触发源没能切到外触发（回读 %s）。' ...
-         '回读通道会一直没有波形。请确认后面板 TrigOut 已接到该通道的 ' ...
-         '[Sync/Ext Mod/Trig/FSK]，或在面板上手动设为 External。'], ch, ms_rd);
-end
-mnc = str2double(writeread(dev, sprintf(':%s:BURSt:NCYCles?', msrc)));
-if ~(isfinite(mnc) && abs(mnc - nc) < 1)
-    error('rigol:dg2052:mirror:ncyc', ...
-        '镜像通道 CH%d 的猝发周期数未写入（欲 %d，回读 %.4g）。', ch, nc, mnc);
-end
 end
 
 

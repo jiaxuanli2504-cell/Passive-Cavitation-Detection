@@ -30,6 +30,12 @@ i0 = [];
 FMT = 'WORD';                          % 想退回 8 位就改这里（decode 两条分支都在）
 
 chan = sprintf('CHANnel%d', ch);
+% 刚改过竖直量程时，错误队列里可能还留着上一条。不先清掉，后面的 DATA?
+% 会没有任何字节回来，读取一直堵到超时（实测连试两次约 16 s，界面像卡死）。
+try
+    writeline(dev, '*CLS');
+catch
+end
 % 通道关着时 :WAVeform:SOURce 会回 -200，屏幕每一帧闪「远程指令执行错误」。
 writeline(dev, sprintf(':CHANnel%d:DISPlay ON', ch));
 writeline(dev, sprintf(':WAVeform:SOURce %s', chan));
@@ -120,17 +126,23 @@ if i0 < 1 || i1 > nact
     i0 = [];
     return
 end
-if strcmp(gate, 'try')
-    writeline(dev, '*CLS');
-end
 write_window(dev, i0, i1);
-if strcmp(gate, 'try')
+if slice_err(dev)
+    % 量程改完后窗口命令会偶发 -200。再写一次；还不行就拆掉窗口，
+    % 改读整段。带着错误去要 DATA?，示波器不回块，读取会卡满超时。
+    try
+        writeline(dev, '*CLS');
+    catch
+    end
+    write_window(dev, i0, i1);
     if slice_err(dev)
-        fprintf('示波器不接受波形读窗口，仍读整段内存。\n');
+        fprintf('示波器不接受波形读窗口，这一帧改读整段内存。\n');
         disarm_slice(dev, nact);
         i0 = [];
         return
     end
+end
+if strcmp(gate, 'try')
     gate = 'on';
     fprintf('波形只读触发后 %d 点（约 %.3f ms），不再传整段内存。\n', ...
         npts, npts * xinc * 1e3);

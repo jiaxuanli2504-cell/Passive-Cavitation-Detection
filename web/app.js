@@ -238,7 +238,7 @@
       studyID: '', directory: '',
       dbg_freq: 1.5, dbg_volt: 20, dbg_drive: 'cw',
       freq_mhz: 1.5, volt_mVpp: 50, amp_gain: 40, prf_hz: 2, n_cycle: 400,
-      cav_pct: 100 * 400 * 2 / 1.5e6, duration_s: 120, npts: 40000,
+      cav_pct: 100 * 400 * 2 / 1.5e6, duration_s: 120, acq_ms: 6, npts: 40000,
       target_db: 2, ic_limit_db: 1, max_mVpp: 120, base_mVpp: 100, vstep_mVpp: 5,
       ctrl_metric: '2f_window_sum', sc_harm: '2f'
     };
@@ -846,41 +846,52 @@
       var lab0 = String(m.label || '');
       var emi = kind === 'emi' || m.emi === true || m.emi === 1;
       var isIc = kind === 'ic' || lab0.indexOf('IC') === 0;
-      // 2*f0 = 3 MHz：任何形式都不画竖线（白线会盖住峰）。
+      // 3 MHz（2×f0）单独画，不跟 2.85 的干扰写在同一行。
       var is2f = kind === 'sc' || kind === '2f' || lab0 === 'SC' || lab0 === '2f' ||
         lab0.indexOf('SC') === 0 || (f0 > 0 && Math.abs(fv - 2 * f0) < 0.12);
+      if (is2f) { return; }
       x = Math.round(x) + 0.5;
-      if (!is2f) {
-        ctx.beginPath();
-        ctx.setLineDash(emi ? [4, 3] : [2, 3]);
-        ctx.strokeStyle = emi ? '#C4A35A' : (isIc ? '#7EB6C9' : C.ref);
-        ctx.lineWidth = 1;
-        ctx.moveTo(x, bb.top);
-        ctx.lineTo(x, bb.top + bb.height);
-        ctx.stroke();
-      }
+      ctx.beginPath();
+      ctx.setLineDash(emi ? [4, 3] : [2, 3]);
+      ctx.strokeStyle = emi ? '#C4A35A' : (isIc ? '#7EB6C9' : C.ref);
+      ctx.lineWidth = 1;
+      ctx.moveTo(x, bb.top);
+      ctx.lineTo(x, bb.top + bb.height);
+      ctx.stroke();
       var lab = lab0;
-      if (!lab && is2f) { lab = 'SC'; }
       if (!lab && emi) { lab = '干扰'; }
       if (lab) {
+        var near3 = f0 > 0 && Math.abs(fv - 2 * f0) < 0.3;
         ctx.setLineDash([]);
-        ctx.fillStyle = emi ? '#C4A35A' : (is2f ? C.line : (isIc ? '#7EB6C9' : C.muted));
+        ctx.fillStyle = emi ? '#C4A35A' : (isIc ? '#7EB6C9' : C.muted);
         ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
-        ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillText(lab, x, is2f ? bb.top + 2 : (isIc ? bb.top + 14 : bb.top + 2));
+        if (emi && near3) {
+          ctx.textAlign = 'right';
+          ctx.fillText(lab, x - 4, bb.top + 2);
+        } else {
+          ctx.textAlign = 'center';
+          ctx.fillText(lab, x, isIc ? bb.top + 14 : bb.top + 2);
+        }
       }
     });
-    // 即使 MATLAB 没发 SC 标记，也在 2f 处写字、不画线
+    // 3.0 MHz：实线加字，和左边 2.85 的「干扰」分开。
     if (f0 > 0) {
       var x2 = u.valToPos(2 * f0, 'x', true);
       if (x2 >= bb.left && x2 <= bb.left + bb.width) {
+        x2 = Math.round(x2) + 0.5;
+        ctx.beginPath();
         ctx.setLineDash([]);
-        ctx.fillStyle = C.line;
-        ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
-        ctx.textAlign = 'center';
+        ctx.strokeStyle = 'rgba(230,234,239,0.35)';
+        ctx.lineWidth = 1;
+        ctx.moveTo(x2, bb.top);
+        ctx.lineTo(x2, bb.top + bb.height);
+        ctx.stroke();
+        ctx.fillStyle = '#E6EAEF';
+        ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText('SC', Math.round(x2) + 0.5, bb.top + 2);
+        ctx.fillText('3.0', x2 + 4, bb.top + 2);
       }
     }
     ctx.restore();

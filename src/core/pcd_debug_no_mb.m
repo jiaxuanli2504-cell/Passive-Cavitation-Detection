@@ -121,6 +121,13 @@ try
         else
             scPcd = scPcd0;
         end
+        if abs(scTx - scTx0) / max(scTx0, 1e-6) > 0.08 || ...
+                abs(scPcd - scPcd0) / max(scPcd0, 1e-6) > 0.08
+            try
+                writeline(scope, '*CLS');
+            catch
+            end
+        end
         if clipped
             if clip_retry < 3
                 clip_retry = clip_retry + 1;
@@ -136,6 +143,11 @@ try
         clip_retry = 0;
         if isempty(chTx) || max(abs(chTx)) == 0
             ui.status('连续测试  这一帧没读到波形，丢掉重采');
+            pause(0.05);
+            continue;
+        end
+        if isempty(chPcd)
+            ui.status('连续测试  PCD 这一帧没读到，丢掉重采');
             pause(0.05);
             continue;
         end

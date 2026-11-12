@@ -22,7 +22,7 @@ g = uigridlayout(fig, [10 1]);
 g.BackgroundColor = C.fig;
 g.Padding = [14 12 14 12];
 g.RowSpacing = 8;
-% 第 8 行放触发/镜像通道，第 9 行放接线说明（接错不报错，必须写在用户会看的地方）
+% 第 8 行放发生器输出通道，第 9 行放接线说明（接错不报错，必须写在用户会看的地方）
 g.RowHeight = {28, 36, '1x', 36, 34, 34, 34, 34, 168, 40};
 
 hint = uilabel(g, 'Text', ...
@@ -69,17 +69,15 @@ trig_sp = mk_ch_pair(row7, C, fn, '示波器 触发', cfg.scope_trig_channel, [0
 uilabel(row7, 'Text', '触发 0=用回读边沿', ...
     'FontColor', C.muted, 'FontName', fn, 'FontSize', 10);
 
-% 触发通道与回读镜像：这两个值决定了整套接线，
-% 以前只能改 ini，界面上看不到也就没法对照接线。
-row8 = uigridlayout(g, [1 3]);
+% 发生器输出通道决定 TrigOut 从哪一路后面板出来。
+row8 = uigridlayout(g, [1 2]);
 row8.Layout.Row = 8;
 row8.BackgroundColor = C.fig;
 row8.Padding = [0 0 0 0];
-row8.ColumnWidth = {'fit', 'fit', '1x'};
+row8.ColumnWidth = {'fit', '1x'};
 row8.ColumnSpacing = 20;
 awg_sp = mk_ch_pair(row8, C, fn, '发生器 输出', cfg.awg_channel, [1 2]);
-mon_sp = mk_ch_pair(row8, C, fn, '发生器 镜像', cfg.awg_monitor_channel, [0 2]);
-uilabel(row8, 'Text', '镜像 0=不启用', ...
+uilabel(row8, 'Text', '回读从功放前三通取，示波器保持 1 MΩ', ...
     'FontColor', C.muted, 'FontName', fn, 'FontSize', 10);
 
 % 接线说明跟着上面的通道号变，不读已经保存的 ini。
@@ -92,7 +90,6 @@ tx_sp.ValueChangedFcn = @(~, ~) refresh_wire();
 pcd_sp.ValueChangedFcn = @(~, ~) refresh_wire();
 trig_sp.ValueChangedFcn = @(~, ~) refresh_wire();
 awg_sp.ValueChangedFcn = @(~, ~) refresh_wire();
-mon_sp.ValueChangedFcn = @(~, ~) refresh_wire();
 refresh_wire();
 
 row_btn = uigridlayout(g, [1 3]);
@@ -232,7 +229,6 @@ uiwait(fig);
         c.scope_pcd_channel = round(pcd_sp.Value);
         c.scope_trig_channel = round(trig_sp.Value);
         c.awg_channel = round(awg_sp.Value);
-        c.awg_monitor_channel = round(mon_sp.Value);
         [~, note] = pcd_wiring(c);
         wire.Text = ['　接线（本实验室这套仪器）' newline note];
     end
@@ -253,28 +249,15 @@ uiwait(fig);
         pcd = round(pcd_sp.Value);
         aw = round(awg_sp.Value);
         tg = round(trig_sp.Value);
-        mw = round(mon_sp.Value);
         if tx == pcd
             uialert(fig, '回读通道与 PCD 通道不能相同。', 'PCD', 'Icon', 'warning');
             return;
         end
-        % 下面三条对应的接线错误不会在采集中报错，只会让数据「看着正常但其实不对」，
-        % 所以在这里就挡住：触发通道撞 PCD、镜像通道撞主通道、开了镜像却没有触发通道。
-        % 注意「触发 CH = 回读 CH」不算错：它与填 0 等价（见 rigol_dho814_setup 的 ttlTrig）。
+        % 触发通道撞 PCD 时采集不会报错，窗会采错，所以在这里就挡住。
+        % 「触发 CH = 回读 CH」不算错：它与填 0 等价（见 rigol_dho814_setup 的 ttlTrig）。
         if tg >= 1 && tg == pcd
             uialert(fig, sprintf('触发通道 CH%d 和 PCD 通道撞了同一路，请另选一路空闲通道。', tg), ...
                 'PCD', 'Icon', 'warning');
-            return;
-        end
-        if mw > 0 && mw == aw
-            uialert(fig, sprintf('回读镜像通道不能和主输出通道相同（都是 CH%d）。', aw), ...
-                'PCD', 'Icon', 'warning');
-            return;
-        end
-        if mw > 0 && tg < 1
-            uialert(fig, ['启用了回读镜像，但「触发 CH」还是 0：副本通道靠主通道后面板 TrigOut ' ...
-                '做外部触发才会输出，没有这根线它一直是空的（回读、削顶检测全部退化成噪声）。' ...
-                '请把「触发 CH」也设上。'], 'PCD', 'Icon', 'warning');
             return;
         end
         cfg.scope_visa = s1;
@@ -285,7 +268,6 @@ uiwait(fig);
         cfg.scope_pcd_channel = pcd;
         cfg.awg_channel = aw;
         cfg.scope_trig_channel = tg;
-        cfg.awg_monitor_channel = mw;
         try
             rigol_instr_config('save', cfg);
             pcd_visa('close');

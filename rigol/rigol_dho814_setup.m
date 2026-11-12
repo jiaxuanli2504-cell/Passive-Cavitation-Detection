@@ -4,16 +4,10 @@ function info = rigol_dho814_setup(dev, targetFs, npts, ~, trigLevel, sweep, bur
 cfg = rigol_instr_config();
 tx  = cfg.scope_tx_channel;
 pcd = cfg.scope_pcd_channel;
-trigCh = tx;
-if isfield(cfg, 'scope_trig_channel')
-    tc = round(cfg.scope_trig_channel);
-    if tc >= 1 && tc <= 4
-        trigCh = tc;
-    end
-end
-% 触发接在另一路（发生器后面板 → CH4）时，电平是 TTL 的 1.5 V。
-% 回读通道那套零点几毫伏永远跨不过 3 V 脉冲。
-ttlTrig = trigCh ~= tx;
+% 手动：回读沿触发。电脑控制：配置里的独立触发通道（通道 3）。
+[trigCh, ttlTrig] = rigol_trig_channel(cfg);
+% 触发接在另一路（发生器后面板 TrigOut）时，电平是 TTL 的 1.5 V。
+% 回读通道那套毫伏电平跨不过 3 V 脉冲。
 if nargin < 5 || isempty(trigLevel)
     trigLevel = 0.005;
 end
